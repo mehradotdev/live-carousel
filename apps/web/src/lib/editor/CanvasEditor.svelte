@@ -123,6 +123,9 @@
     );
   });
   const scene = $derived(draft ?? workspace);
+  const toolBase =
+    'btn btn-sm leading-[1.45] h-auto min-h-[34px] px-[10px] py-[6px] text-sm font-normal';
+  const toolButton = `${toolBase} border-primary/30 bg-base-100 text-secondary`;
   const chosen = $derived(scene.layers.find((l) => l.id === selected));
   const borders = $derived(dividers(scene));
   const frame = (l: Layer) =>
@@ -400,58 +403,90 @@
   }}
 />
 
-<div class="canvas-controls">
-  <p id="canvas-instructions">
+<div
+  class="mb-3 flex items-center justify-between gap-3 max-[900px]:flex-wrap max-[900px]:items-start"
+>
+  <p id="canvas-instructions" class="text-sm leading-[1.5] text-neutral">
     {scene.style === 'scrapbook'
       ? 'Drag photos to move · corners to resize · top handle to rotate'
       : 'Drag a photo onto another or use arrow keys to swap · drag a divider to resize cells'}
   </p>
-  <div class="view-zoom">
+  <div class="flex shrink-0 items-center gap-[5px]">
     <button
+      class={[toolButton, 'max-[900px]:min-w-9']}
       aria-label="Zoom canvas out"
       disabled={zoom <= 1}
       onclick={() => (zoom = Math.max(1, zoom - 0.25))}>−</button
-    ><span>{Math.round(zoom * 100)}%</span><button
+    ><span class="min-w-[42px] text-center text-sm"
+      >{Math.round(zoom * 100)}%</span
+    ><button
+      class={[toolButton, 'max-[900px]:min-w-9']}
       aria-label="Zoom canvas in"
       disabled={zoom >= 2.5}
       onclick={() => (zoom = Math.min(2.5, zoom + 0.25))}>+</button
-    ><button onclick={() => (zoom = 1)}>Fit</button>
+    ><button
+      class={[toolButton, 'max-[900px]:min-w-9']}
+      onclick={() => (zoom = 1)}>Fit</button
+    >
   </div>
 </div>
-<div class="selection-tools" aria-label="Selected photo actions">
+<div
+  class="mb-[10px] flex min-h-[42px] flex-wrap items-center gap-[7px] text-sm text-neutral"
+  aria-label="Selected photo actions"
+>
   {#if chosen}
-    <strong>Photo {scene.layers.indexOf(chosen) + 1}</strong>
+    <strong class="mr-[5px]">Photo {scene.layers.indexOf(chosen) + 1}</strong>
     <button
-      class:tool-active={cropMode}
+      class={[
+        'max-[900px]:min-h-10',
+        cropMode
+          ? `${toolBase} border-primary/30 bg-primary text-primary-content`
+          : toolButton,
+      ]}
       disabled={!enabled}
       aria-pressed={cropMode}
       onclick={() => (cropMode = !cropMode)}
       >{cropMode ? 'Done cropping' : 'Crop photo'}</button
     >
     {#if scene.style === 'scrapbook'}
-      <button disabled={!enabled} onclick={() => reorder('forward')}
-        >Bring forward</button
-      ><button disabled={!enabled} onclick={() => reorder('backward')}
-        >Send backward</button
+      <button
+        class={[toolButton, 'max-[900px]:min-h-10']}
+        disabled={!enabled}
+        onclick={() => reorder('forward')}>Bring forward</button
+      ><button
+        class={[toolButton, 'max-[900px]:min-h-10']}
+        disabled={!enabled}
+        onclick={() => reorder('backward')}>Send backward</button
       >
-      <button disabled={!enabled} onclick={() => reorder('front')}
-        >Bring to front</button
-      ><button disabled={!enabled} onclick={() => reorder('back')}
-        >Send to back</button
+      <button
+        class={[toolButton, 'max-[900px]:min-h-10']}
+        disabled={!enabled}
+        onclick={() => reorder('front')}>Bring to front</button
+      ><button
+        class={[toolButton, 'max-[900px]:min-h-10']}
+        disabled={!enabled}
+        onclick={() => reorder('back')}>Send to back</button
       >
-      <button class="delete-photo" disabled={!enabled} onclick={remove}
-        >Delete photo</button
+      <button
+        class={[
+          toolBase,
+          'border-error/30 bg-base-100 text-error max-[900px]:min-h-10',
+        ]}
+        disabled={!enabled}
+        onclick={remove}>Delete photo</button
       >
     {/if}
   {:else}<span>Select a photo on the canvas to edit it.</span>{/if}
 </div>
-{#if cropMode && chosen}<p class="crop-hint">
+{#if cropMode && chosen}<p class="mb-[10px] text-sm text-secondary">
     Drag inside the selected photo to reframe it. Use Photo zoom below to get
     closer.
   </p>{/if}
-<div class="canvas-scroller">
+<div
+  class="-mx-[14px] overflow-auto px-[14px] pt-10 pb-5 [scrollbar-width:thin]"
+>
   <div
-    class="scene-wrap interactive-scene"
+    class="relative aspect-[3240/1350] min-w-0 shadow-[0_3px_20px_currentColor] shadow-base-content/8 outline-none focus-visible:outline-2 focus-visible:outline-offset-8 focus-visible:outline-primary"
     bind:this={stage}
     style:width={`${zoom * 100}%`}
     role="group"
@@ -465,13 +500,21 @@
       if (gesture) cancel();
     }}
   >
-    <canvas bind:this={canvas} aria-label="Your continuous three-slide collage"
+    <canvas
+      class="block size-full"
+      bind:this={canvas}
+      aria-label="Your continuous three-slide collage"
     ></canvas>
-    <div class="guides" aria-hidden="true">
-      <span></span><span></span><span></span>
+    <div
+      class="pointer-events-none absolute inset-0 grid grid-cols-3"
+      aria-hidden="true"
+    >
+      <span class="border-r border-dashed border-base-100/60"></span><span
+        class="border-r border-dashed border-base-100/60"
+      ></span><span></span>
     </div>
     <button
-      class="canvas-background"
+      class="absolute inset-0 size-full"
       aria-label="Clear photo selection"
       onclick={() => {
         selected = '';
@@ -481,11 +524,16 @@
     ></button>
     {#each scene.layers as l, i (l.id)}
       <button
-        class="photo-hit"
-        class:selected={selected === l.id}
-        class:drag-source={swapping && gesture?.id === l.id}
-        class:drop-target={dropTarget === l.id && gesture?.id !== l.id}
-        class:crop-mode={cropMode && selected === l.id}
+        class={[
+          'photo-hit absolute touch-none rounded-[2px] p-0 focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-secondary',
+          cropMode && selected === l.id
+            ? 'cursor-move'
+            : 'cursor-grab active:cursor-grabbing',
+          swapping && gesture?.id === l.id && 'drag-source bg-base-300/67',
+          dropTarget === l.id &&
+            gesture?.id !== l.id &&
+            'drop-target bg-accent/33 outline-4 -outline-offset-4 outline-accent',
+        ]}
         data-layer-id={l.id}
         style={frame(l)}
         style:z-index={i + 1}
@@ -511,9 +559,12 @@
     {#if enabled && scene.style === 'bento'}
       {#each borders as d (d.path)}
         <button
-          class="divider-handle"
-          class:vertical={d.axis === 'x'}
-          class:horizontal={d.axis === 'y'}
+          class={[
+            'divider-handle absolute z-25 touch-none p-0 before:absolute before:inset-0 before:bg-primary/27 before:opacity-0 hover:before:opacity-100 focus-visible:before:opacity-100',
+            d.axis === 'x'
+              ? '-translate-x-1/2 cursor-col-resize'
+              : '-translate-y-1/2 cursor-row-resize',
+          ]}
           style:left={`${((d.axis === 'x' ? d.position : d.x) / (WIDTH * SLIDES)) * 100}%`}
           style:top={`${((d.axis === 'y' ? d.position : d.y) / HEIGHT) * 100}%`}
           style:width={d.axis === 'x'
@@ -541,21 +592,43 @@
                 ),
               );
             }
-          }}><span>⋮</span></button
+          }}
+          ><span
+            class={[
+              'absolute top-1/2 left-1/2 grid h-7 w-4 -translate-1/2 place-items-center rounded-[4px] border border-primary/50 bg-base-100 text-[20px] leading-none text-secondary shadow-[0_1px_3px_currentColor] shadow-base-content/15',
+              d.axis === 'y' && 'rotate-90',
+            ]}>⋮</span
+          ></button
         >
       {/each}
     {/if}
     {#if chosen && enabled}
-      <div class="selection-box" style={frame(chosen)}>
-        <span class="photo-number">{scene.layers.indexOf(chosen) + 1}</span>
+      <div
+        class="pointer-events-none absolute z-40 border-2 border-secondary"
+        style={frame(chosen)}
+      >
+        <span
+          class="absolute top-[2px] left-[2px] rounded-[3px] bg-secondary px-[6px] py-[3px] text-[12px] leading-[1.2] text-secondary-content"
+          >{scene.layers.indexOf(chosen) + 1}</span
+        >
         {#if scene.style === 'scrapbook' && !cropMode}
           {#each ['nw', 'ne', 'sw', 'se'] as corner (corner)}<button
-              class={`resize-handle ${corner}`}
+              class={[
+                'pointer-events-auto absolute size-[14px] touch-none rounded-[3px] border-2 border-secondary bg-base-100 p-0',
+                {
+                  nw: '-top-2 -left-2 cursor-nwse-resize',
+                  ne: '-top-2 -right-2 cursor-nesw-resize',
+                  sw: '-bottom-2 -left-2 cursor-nesw-resize',
+                  se: '-right-2 -bottom-2 cursor-nwse-resize',
+                }[corner],
+              ]}
               aria-label={`Resize photo ${corner}`}
               onpointerdown={(e) => start(e, 'resize', chosen.id, corner)}
             ></button>{/each}
-          <span class="rotation-stem"></span><button
-            class="rotation-handle"
+          <span
+            class="absolute -top-[25px] left-1/2 h-[23px] border-l-2 border-secondary"
+          ></span><button
+            class="pointer-events-auto absolute -top-12 left-1/2 size-7 -translate-x-1/2 cursor-grab touch-none rounded-full border border-secondary bg-base-100 p-0 text-[20px] text-secondary"
             aria-label="Rotate photo"
             onpointerdown={(e) => start(e, 'rotate', chosen.id)}>↻</button
           >
@@ -564,16 +637,25 @@
     {/if}
     {#if swapping && draggedLayer && dragClient}
       <div
-        class="swap-ghost"
-        class:over-target={dropTarget && dropTarget !== gesture?.id}
+        class={[
+          'swap-ghost pointer-events-none fixed z-1000 w-36 -rotate-4 rounded-[9px] border bg-base-100 p-[7px] text-secondary shadow-[0_8px_24px_currentColor] shadow-base-content/20',
+          dropTarget && dropTarget !== gesture?.id
+            ? 'border-success'
+            : 'border-base-content/30',
+        ]}
         style={ghostPosition()}
         aria-hidden="true"
       >
-        <div class="ghost-photo">
-          <canvas bind:this={ghostCanvas} data-asset-id={draggedLayer.assetId}
+        <div
+          class="flex h-24 items-center justify-center overflow-hidden rounded-[4px] bg-base-300"
+        >
+          <canvas
+            class="block opacity-72 grayscale-50"
+            bind:this={ghostCanvas}
+            data-asset-id={draggedLayer.assetId}
           ></canvas>
         </div>
-        <span
+        <span class="mt-[6px] block text-center text-[13px] leading-[1.4]"
           >{dropTarget && dropTarget !== gesture?.id
             ? 'Release to swap'
             : 'Drop on a photo'}</span
@@ -582,300 +664,8 @@
     {/if}
   </div>
 </div>
-<div class="slide-labels">
+<div
+  class="mt-3 grid grid-cols-3 text-center text-sm tracking-[0.5px] text-neutral"
+>
   <span>Slide 1</span><span>Slide 2</span><span>Slide 3</span>
 </div>
-
-<style>
-  .canvas-controls {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    margin-bottom: 12px;
-  }
-  .canvas-controls p {
-    font-size: 14px;
-    color: #626c52;
-    margin: 0;
-    line-height: 1.5;
-  }
-  .view-zoom {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    flex-shrink: 0;
-  }
-  .view-zoom button,
-  .selection-tools button {
-    border: 1px solid #cdd3bd;
-    border-radius: 6px;
-    background: #fffefa;
-    color: #485735;
-    font-size: 14px;
-    min-height: 34px;
-    padding: 6px 10px;
-  }
-  .view-zoom span {
-    font-size: 14px;
-    min-width: 42px;
-    text-align: center;
-  }
-  .selection-tools {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 7px;
-    min-height: 42px;
-    margin: 0 0 10px;
-    font-size: 14px;
-    color: #626c52;
-  }
-  .selection-tools strong {
-    margin-right: 5px;
-  }
-  .selection-tools .tool-active {
-    background: #727f46;
-    color: white;
-  }
-  .selection-tools .delete-photo {
-    color: #9d3828;
-    border-color: #dfbcac;
-  }
-  .crop-hint {
-    font-size: 14px;
-    margin: 0 0 10px;
-    color: #59663b;
-  }
-  .canvas-scroller {
-    overflow: auto;
-    padding: 40px 14px 20px;
-    margin: 0 -14px;
-    scrollbar-width: thin;
-  }
-  .interactive-scene {
-    min-width: 0;
-    aspect-ratio: 3240/1350;
-    outline: none;
-  }
-  .interactive-scene:focus-visible {
-    outline: 2px solid #727f46;
-    outline-offset: 8px;
-  }
-  .interactive-scene canvas {
-    width: 100%;
-    height: 100%;
-    display: block;
-  }
-  .canvas-background {
-    position: absolute;
-    inset: 0;
-    border: 0;
-    background: none;
-    width: 100%;
-    height: 100%;
-  }
-  .photo-hit {
-    position: absolute;
-    border: 0;
-    background: transparent;
-    padding: 0;
-    touch-action: none;
-    cursor: grab;
-    border-radius: 2px;
-  }
-  .photo-hit:active {
-    cursor: grabbing;
-  }
-  .photo-hit:focus-visible {
-    outline: 3px solid #526e2c;
-    outline-offset: 2px;
-  }
-  .photo-hit.drop-target {
-    outline: 4px solid #a8c65b;
-    outline-offset: -4px;
-    background: #bad67e55;
-  }
-  .photo-hit.crop-mode {
-    cursor: move;
-  }
-  .selection-box {
-    position: absolute;
-    border: 2px solid #5f7c35;
-    pointer-events: none;
-    z-index: 40;
-  }
-  .photo-number {
-    position: absolute;
-    left: 2px;
-    top: 2px;
-    background: #506a2c;
-    color: white;
-    font-size: 12px;
-    padding: 3px 6px;
-    border-radius: 3px;
-    line-height: 1.2;
-  }
-  .resize-handle {
-    position: absolute;
-    width: 14px;
-    height: 14px;
-    border: 2px solid #506a2c;
-    border-radius: 3px;
-    background: #fffefa;
-    pointer-events: auto;
-    touch-action: none;
-    padding: 0;
-  }
-  .nw {
-    left: -8px;
-    top: -8px;
-    cursor: nwse-resize;
-  }
-  .ne {
-    right: -8px;
-    top: -8px;
-    cursor: nesw-resize;
-  }
-  .sw {
-    left: -8px;
-    bottom: -8px;
-    cursor: nesw-resize;
-  }
-  .se {
-    right: -8px;
-    bottom: -8px;
-    cursor: nwse-resize;
-  }
-  .rotation-stem {
-    position: absolute;
-    height: 23px;
-    left: 50%;
-    top: -25px;
-    border-left: 2px solid #506a2c;
-  }
-  .rotation-handle {
-    position: absolute;
-    left: 50%;
-    top: -48px;
-    transform: translateX(-50%);
-    width: 28px;
-    height: 28px;
-    border: 1px solid #506a2c;
-    border-radius: 50%;
-    background: #fffefa;
-    color: #425b25;
-    pointer-events: auto;
-    touch-action: none;
-    padding: 0;
-    cursor: grab;
-    font-size: 20px;
-  }
-  .divider-handle {
-    position: absolute;
-    z-index: 25;
-    background: transparent;
-    border: 0;
-    padding: 0;
-    touch-action: none;
-  }
-  .divider-handle.vertical {
-    transform: translateX(-50%);
-    cursor: col-resize;
-  }
-  .divider-handle.horizontal {
-    transform: translateY(-50%);
-    cursor: row-resize;
-  }
-  .divider-handle:before {
-    content: '';
-    position: absolute;
-    inset: 0;
-    background: #758b4244;
-    opacity: 0;
-  }
-  .divider-handle:hover:before,
-  .divider-handle:focus-visible:before {
-    opacity: 1;
-  }
-  .divider-handle span {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    display: grid;
-    place-items: center;
-    line-height: 1;
-    font-size: 20px;
-    color: #425b25;
-    background: #fffefa;
-    border: 1px solid #abb890;
-    border-radius: 4px;
-    width: 16px;
-    height: 28px;
-    box-shadow: 0 1px 3px #0002;
-  }
-  .divider-handle.horizontal span {
-    transform: translate(-50%, -50%) rotate(90deg);
-  }
-  .photo-hit.drag-source {
-    background: #e5e7e4aa;
-  }
-  .swap-ghost {
-    position: fixed;
-    pointer-events: none;
-    z-index: 1000;
-    width: 144px;
-    padding: 7px;
-    border: 1px solid #adb5a5;
-    background: #fafbf8;
-    color: #45533a;
-    border-radius: 9px;
-    box-shadow: 0 8px 24px #20282035;
-    transform: rotate(-4deg);
-  }
-  .swap-ghost.over-target {
-    border-color: #6d8c3b;
-  }
-  .ghost-photo {
-    height: 96px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: #e8eae5;
-    border-radius: 4px;
-    overflow: hidden;
-  }
-  .ghost-photo canvas {
-    display: block;
-    opacity: 0.72;
-    filter: grayscale(0.5);
-  }
-  .swap-ghost span {
-    display: block;
-    font-size: 13px;
-    line-height: 1.4;
-    text-align: center;
-    margin-top: 6px;
-  }
-  @media (max-width: 900px) {
-    .canvas-controls {
-      align-items: flex-start;
-      flex-wrap: wrap;
-    }
-    .canvas-controls p {
-      font-size: 14px;
-    }
-    .selection-tools button {
-      min-height: 40px;
-    }
-    .view-zoom button {
-      min-width: 36px;
-    }
-  }
-  @media (prefers-reduced-motion: reduce) {
-    * {
-      transition: none !important;
-    }
-  }
-</style>

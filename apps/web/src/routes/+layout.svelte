@@ -1,4 +1,5 @@
 <script lang="ts">
+  import '../app.css';
   import favicon from '#lib/assets/favicon.svg';
   import type { LayoutProps } from './$types';
   import { PUBLIC_CONVEX_URL } from '$app/env/public';
