@@ -4,9 +4,17 @@ export const MAX_SLIDES = 20;
 export const ASPECTS = { '4:5': 1350, '3:4': 1440, '1:1': 1080, '9:16': 1920 } as const;
 export type Aspect = keyof typeof ASPECTS;
 export const slideSize = (aspect: Aspect) => ({ width: WIDTH, height: ASPECTS[aspect] });
-export const GAP = 12;
-export const INSET = 24;
 export const MIN_TILE = 120;
+export const SPACING_MAX = { gap: 60, margin: 120, radius: 60 } as const;
+export type Spacing = Record<keyof typeof SPACING_MAX, number>;
+export const BACKGROUNDS = [
+  ['Cream', '#f3eee4'],
+  ['White', '#ffffff'],
+  ['Blush', '#f4dfd6'],
+  ['Sage', '#dfe5d6'],
+  ['Mist', '#d6e0e6'],
+  ['Ink', '#1c1a17'],
+] as const;
 export const BENTO_PER_SLIDE = 6;
 // Scrapbook layers always keep this much of their rotated bounds on the canvas.
 export const GRAB = 48;
@@ -37,6 +45,11 @@ export interface Layer {
 export type BentoNode =
   | { layerId: string }
   | { axis: 'x' | 'y'; ratio: number; first: BentoNode; second: BentoNode };
+export interface BentoLayout extends Spacing {
+  tree?: BentoNode;
+  layers: Layer[];
+  template: Template;
+}
 export interface Workspace {
   version: 1;
   aspect: Aspect;
@@ -44,9 +57,8 @@ export interface Workspace {
   style: Style;
   seed: number;
   background: string;
-  layers: Layer[];
-  template?: Template;
-  bento?: BentoNode;
+  bento: BentoLayout;
+  scrapbook: { layers: Layer[] };
 }
 export interface Project {
   workspace: Workspace;
@@ -77,25 +89,31 @@ function random(seed: number) {
     return n / 4294967296;
   };
 }
-type Size = Pick<Workspace, 'aspect' | 'slides'>;
-const rootRect = ({ aspect, slides }: Size) => ({
-  x: INSET,
-  y: INSET,
-  width: WIDTH * slides - INSET * 2,
-  height: ASPECTS[aspect] - INSET * 2,
+export const activeLayers = (workspace: Workspace) => workspace[workspace.style].layers;
+export const withLayers = (workspace: Workspace, layers: Layer[]): Workspace => ({
+  ...workspace,
+  [workspace.style]: { ...workspace[workspace.style], layers },
 });
-function split(rect: Rect, axis: 'x' | 'y', ratio: number): [Rect, Rect] {
+type Size = Pick<Workspace, 'aspect' | 'slides'>;
+type Frame = Size & { bento: Spacing };
+const rootRect = ({ aspect, slides, bento: { margin } }: Frame) => ({
+  x: margin,
+  y: margin,
+  width: WIDTH * slides - margin * 2,
+  height: ASPECTS[aspect] - margin * 2,
+});
+function split(rect: Rect, axis: 'x' | 'y', ratio: number, gap: number): [Rect, Rect] {
   if (axis === 'x') {
-    const w = (rect.width - GAP) * ratio;
+    const w = (rect.width - gap) * ratio;
     return [
       { ...rect, width: w },
-      { ...rect, x: rect.x + w + GAP, width: rect.width - w - GAP },
+      { ...rect, x: rect.x + w + gap, width: rect.width - w - gap },
     ];
   }
-  const h = (rect.height - GAP) * ratio;
+  const h = (rect.height - gap) * ratio;
   return [
     { ...rect, height: h },
-    { ...rect, y: rect.y + h + GAP, height: rect.height - h - GAP },
+    { ...rect, y: rect.y + h + gap, height: rect.height - h - gap },
   ];
 }
 function buildTree(
@@ -103,6 +121,7 @@ function buildTree(
   rect: Rect,
   template: Template,
   rng: () => number,
+  gap: number,
   depth = 0,
 ): BentoNode {
   if (ids.length === 1) return { layerId: ids[0] };
@@ -122,12 +141,12 @@ function buildTree(
     0.25,
     0.75,
   );
-  const [a, b] = split(rect, axis, ratio);
+  const [a, b] = split(rect, axis, ratio, gap);
   return {
     axis,
     ratio,
-    first: buildTree(ids.slice(0, count), a, template, rng, depth + 1),
-    second: buildTree(ids.slice(count), b, template, rng, depth + 1),
+    first: buildTree(ids.slice(0, count), a, template, rng, gap, depth + 1),
+    second: buildTree(ids.slice(count), b, template, rng, gap, depth + 1),
   };
 }
 // Automatic Bento places photos in `order` (at most BENTO_PER_SLIDE per slide), dropping the
@@ -135,72 +154,80 @@ function buildTree(
 function fitBento(
   ids: string[],
   order: string[],
-  size: Size,
+  frame: Frame,
   template: Template,
   rng: () => number,
 ): BentoNode | undefined {
-  for (let n = Math.min(order.length, BENTO_PER_SLIDE * size.slides); n > 0; n--) {
+  const { gap } = frame.bento;
+  for (let n = Math.min(order.length, BENTO_PER_SLIDE * frame.slides); n > 0; n--) {
     const keep = new Set(order.slice(0, n));
     const tree = buildTree(
       ids.filter((id) => keep.has(id)),
-      rootRect(size),
+      rootRect(frame),
       template,
       rng,
+      gap,
     );
     let fits = true;
-    visit(tree, rootRect(size), (node, rect) => {
+    visit(tree, rootRect(frame), gap, (node, rect) => {
       if ('layerId' in node && (rect.width < MIN_TILE || rect.height < MIN_TILE)) fits = false;
     });
     if (fits) return tree;
   }
 }
-function minimum(node: BentoNode): { width: number; height: number } {
+function minimum(node: BentoNode, gap: number): { width: number; height: number } {
   if ('layerId' in node) return { width: MIN_TILE, height: MIN_TILE };
-  const a = minimum(node.first);
-  const b = minimum(node.second);
+  const a = minimum(node.first, gap);
+  const b = minimum(node.second, gap);
   return node.axis === 'x'
     ? {
-        width: Math.max(a.width / node.ratio, b.width / (1 - node.ratio)) + GAP,
+        width: Math.max(a.width / node.ratio, b.width / (1 - node.ratio)) + gap,
         height: Math.max(a.height, b.height),
       }
     : {
         width: Math.max(a.width, b.width),
-        height: Math.max(a.height / node.ratio, b.height / (1 - node.ratio)) + GAP,
+        height: Math.max(a.height / node.ratio, b.height / (1 - node.ratio)) + gap,
       };
 }
 function visit(
   node: BentoNode,
   rect: Rect,
+  gap: number,
   fn: (node: BentoNode, rect: Rect, path: string) => void,
   path = '',
 ) {
   fn(node, rect, path);
   if ('layerId' in node) return;
-  const [a, b] = split(rect, node.axis, node.ratio);
-  visit(node.first, a, fn, path + '0');
-  visit(node.second, b, fn, path + '1');
+  const [a, b] = split(rect, node.axis, node.ratio, gap);
+  visit(node.first, a, gap, fn, path + '0');
+  visit(node.second, b, gap, fn, path + '1');
 }
 export function applyBento(workspace: Workspace): Workspace {
-  if (!workspace.bento) return workspace;
+  const { bento } = workspace;
   const rectangles = new Map<string, Rect>();
-  visit(workspace.bento, rootRect(workspace), (node, rect) => {
-    if ('layerId' in node) rectangles.set(node.layerId, rect);
-  });
+  if (bento.tree)
+    visit(bento.tree, rootRect(workspace), bento.gap, (node, rect) => {
+      if ('layerId' in node) rectangles.set(node.layerId, rect);
+    });
   return {
     ...workspace,
-    // Layers outside the tree are unplaced and go back to the photo tray.
-    layers: workspace.layers
-      .filter((l) => rectangles.has(l.id))
-      .map((l) => ({ ...l, ...rectangles.get(l.id), rotation: 0 })),
+    bento: {
+      ...bento,
+      // Layers outside the tree are unplaced and go back to the photo tray.
+      layers: bento.layers
+        .filter((l) => rectangles.has(l.id))
+        .map((l) => ({ ...l, ...rectangles.get(l.id), rotation: 0 })),
+    },
   };
 }
 export function dividers(workspace: Workspace): Divider[] {
-  if (!workspace.bento || workspace.style !== 'bento') return [];
+  const { tree, gap } = workspace.bento;
+  if (!tree || workspace.style !== 'bento') return [];
   const result: Divider[] = [];
-  visit(workspace.bento, rootRect(workspace), (node, rect, path) => {
+  visit(tree, rootRect(workspace), gap, (node, rect, path) => {
     if ('layerId' in node) return;
-    const a = minimum(node.first);
-    const b = minimum(node.second);
+    const a = minimum(node.first, gap);
+    const b = minimum(node.second, gap);
     const axis = node.axis;
     const origin = rect[axis];
     const size = axis === 'x' ? rect.width : rect.height;
@@ -208,35 +235,134 @@ export function dividers(workspace: Workspace): Divider[] {
       ...rect,
       path,
       axis,
-      position: origin + (size - GAP) * node.ratio + GAP / 2,
-      min: origin + (axis === 'x' ? a.width : a.height) + GAP / 2,
-      max: origin + size - (axis === 'x' ? b.width : b.height) - GAP / 2,
+      position: origin + (size - gap) * node.ratio + gap / 2,
+      min: origin + (axis === 'x' ? a.width : a.height) + gap / 2,
+      max: origin + size - (axis === 'x' ? b.width : b.height) - gap / 2,
     });
   });
   return result;
 }
+function withRatio(node: BentoNode, path: string, ratio: number): BentoNode {
+  if ('layerId' in node) return node;
+  if (!path) return { ...node, ratio };
+  return path[0] === '0'
+    ? { ...node, first: withRatio(node.first, path.slice(1), ratio) }
+    : { ...node, second: withRatio(node.second, path.slice(1), ratio) };
+}
 export function resizeDivider(workspace: Workspace, path: string, position: number): Workspace {
   const divider = dividers(workspace).find((d) => d.path === path);
   if (!divider || divider.min > divider.max) return workspace;
-  const tree = structuredClone(workspace.bento!);
-  let node = tree;
-  for (const char of path) {
-    if ('layerId' in node) return workspace;
-    node = char === '0' ? node.first : node.second;
+  const { tree, gap } = workspace.bento;
+  const ratio =
+    (clamp(position, divider.min, divider.max) - divider[divider.axis] - gap / 2) /
+    ((divider.axis === 'x' ? divider.width : divider.height) - gap);
+  return applyBento({
+    ...workspace,
+    bento: { ...workspace.bento, tree: withRatio(tree!, path, ratio) },
+  });
+}
+// Swaps leaf `id` for `next`; without a replacement its sibling takes over the parent's rect.
+function replaceLeaf(node: BentoNode, id: string, next?: BentoNode): BentoNode | undefined {
+  if ('layerId' in node) return node.layerId === id ? next : node;
+  const first = replaceLeaf(node.first, id, next);
+  const second = replaceLeaf(node.second, id, next);
+  return first && second ? { ...node, first, second } : (first ?? second);
+}
+// Removes a photo from the active layout only; it stays in the library, so the tray offers it again.
+export function removeLayer(workspace: Workspace, id: string): Workspace {
+  if (workspace.style === 'scrapbook')
+    return withLayers(
+      workspace,
+      workspace.scrapbook.layers.filter((l) => l.id !== id),
+    );
+  const { bento } = workspace;
+  return applyBento({
+    ...workspace,
+    bento: { ...bento, tree: bento.tree && replaceLeaf(bento.tree, id) },
+  });
+}
+export function removeAsset(workspace: Workspace, assetId: string): Workspace {
+  let { tree } = workspace.bento;
+  for (const l of workspace.bento.layers)
+    if (l.assetId === assetId) tree = tree && replaceLeaf(tree, l.id);
+  return applyBento({
+    ...workspace,
+    bento: { ...workspace.bento, tree },
+    scrapbook: { layers: workspace.scrapbook.layers.filter((l) => l.assetId !== assetId) },
+  });
+}
+// Splits `target` (or the largest cell) 50/50 along its longer side; returns `workspace` itself when that would leave a cell below MIN_TILE.
+export function addToBento(workspace: Workspace, assetId: string, target?: string): Workspace {
+  const { bento } = workspace;
+  const layer: Layer = {
+    id: crypto.randomUUID(),
+    assetId,
+    x: 0,
+    y: 0,
+    width: 0,
+    height: 0,
+    rotation: 0,
+    zoom: 1,
+    panX: 0.5,
+    panY: 0.5,
+  };
+  const layers = [...bento.layers, layer];
+  if (!bento.tree)
+    return applyBento({ ...workspace, bento: { ...bento, layers, tree: { layerId: layer.id } } });
+  const cell =
+    bento.layers.find((l) => l.id === target) ??
+    bento.layers.reduce((a, b) => (b.width * b.height > a.width * a.height ? b : a));
+  const axis = cell.width >= cell.height ? 'x' : 'y';
+  if (((axis === 'x' ? cell.width : cell.height) - bento.gap) / 2 < MIN_TILE) return workspace;
+  const tree = replaceLeaf(bento.tree, cell.id, {
+    axis,
+    ratio: 0.5,
+    first: { layerId: cell.id },
+    second: { layerId: layer.id },
+  });
+  return applyBento({ ...workspace, bento: { ...bento, layers, tree } });
+}
+// New uploads reach both layouts. An empty Bento gets an automatic layout; `target` applies to a single photo.
+export function addPhotos(workspace: Workspace, assets: Asset[], target?: string): Workspace {
+  const { scrapbook, bento } = workspace;
+  const seed = workspace.seed + scrapbook.layers.length;
+  const placed = layout(assets, 'scrapbook', seed, undefined, workspace).scrapbook.layers;
+  const next = {
+    ...workspace,
+    scrapbook: {
+      layers: [...scrapbook.layers, ...placed.map((l) => ({ ...l, id: crypto.randomUUID() }))],
+    },
+  };
+  if (!bento.tree)
+    return {
+      ...next,
+      bento: layout(assets, 'bento', workspace.seed, bento.template, workspace).bento,
+    };
+  return assets.reduce(
+    (w, a) => addToBento(w, a.id, assets.length === 1 ? target : undefined),
+    next as Workspace,
+  );
+}
+// Largest value up to `value` that keeps every cell at least MIN_TILE.
+export function setSpacing(workspace: Workspace, key: keyof Spacing, value: number): Workspace {
+  for (let v = value; v >= 0; v--) {
+    const next = applyBento({ ...workspace, bento: { ...workspace.bento, [key]: v } });
+    if (next.bento.layers.every((l) => Math.min(l.width, l.height) >= MIN_TILE - 0.001))
+      return next;
   }
-  if ('layerId' in node) return workspace;
-  node.ratio =
-    (clamp(position, divider.min, divider.max) - divider[node.axis] - GAP / 2) /
-    ((node.axis === 'x' ? divider.width : divider.height) - GAP);
-  return applyBento({ ...workspace, bento: tree });
+  return workspace;
 }
 export function layout(
   assets: Asset[],
   style: Style,
   seed = 0,
   template: Template = TEMPLATES[seed % TEMPLATES.length],
-  { aspect, slides }: Size = { aspect: '4:5', slides: 3 },
+  base: Size & Partial<Pick<Workspace, 'background'>> & { bento?: Spacing } = {
+    aspect: '4:5',
+    slides: 3,
+  },
 ): Workspace {
+  const { aspect, slides } = base;
   if (assets.length > MAX_PHOTOS)
     throw new Error(`Keep your collage to ${MAX_PHOTOS} photos or fewer.`);
   const slideHeight = ASPECTS[aspect];
@@ -271,20 +397,21 @@ export function layout(
       panY: 0.5,
     };
   });
+  const { gap = 12, margin = 24, radius = 0 } = base.bento ?? {};
   const workspace: Workspace = {
     version: 1,
     aspect,
     slides,
     style,
     seed,
-    background: '#f3eee4',
-    layers,
-    template,
+    background: base.background ?? BACKGROUNDS[0][1],
+    bento: { layers, template, gap, margin, radius },
+    scrapbook: { layers },
   };
-  if (style === 'scrapbook' || !layers.length) return workspace;
+  if (!layers.length) return workspace;
   // Layer ids are in shuffled order; placement priority follows the incoming photo order.
   const rank = new Map(assets.map((a, i) => [a.id, i]));
-  workspace.bento = fitBento(
+  workspace.bento.tree = fitBento(
     layers.map((l) => l.id),
     [...layers].sort((a, b) => rank.get(a.assetId)! - rank.get(b.assetId)!).map((l) => l.id),
     workspace,
@@ -293,37 +420,48 @@ export function layout(
   );
   return applyBento(workspace);
 }
+// Shuffle and templates rebuild the active layout only; the other style keeps what was left.
+export function regenerate(
+  workspace: Workspace,
+  assets: Asset[],
+  seed: number,
+  template?: Template,
+): Workspace {
+  const fresh = layout(assets, workspace.style, seed, template, workspace);
+  return workspace.style === 'bento'
+    ? { ...fresh, scrapbook: workspace.scrapbook }
+    : { ...fresh, bento: workspace.bento };
+}
 // Bento rebuilds the tree in the same layer order (crops kept, dividers reset). Scrapbook keeps
 // photo proportions: size and centre y scale by the height ratio, centre x stays (width is fixed).
 // Layers centred past a removed slide move onto the last slide. Every Scrapbook layer stays grabbable.
 export function resize(workspace: Workspace, aspect: Aspect, slides: number): Workspace {
   const next = { ...workspace, aspect, slides };
-  if (workspace.style === 'bento') {
-    const template = workspace.template ?? TEMPLATES[workspace.seed % TEMPLATES.length];
-    const rng = random(workspace.seed * 37 + TEMPLATES.indexOf(template) * 103);
-    const ids = workspace.layers.map((l) => l.id);
-    const bento = fitBento(ids, ids, next, template, rng);
-    return applyBento({ ...next, template, bento });
-  }
+  const { template } = workspace.bento;
+  const rng = random(workspace.seed * 37 + TEMPLATES.indexOf(template) * 103);
+  const ids = workspace.bento.layers.map((l) => l.id);
+  const tree = fitBento(ids, ids, next, template, rng);
   const k = ASPECTS[aspect] / ASPECTS[workspace.aspect];
   const end = WIDTH * slides;
   return {
-    ...next,
-    layers: workspace.layers.map((l) => {
-      const width = l.width * k;
-      const height = l.height * k;
-      const cx = l.x + l.width / 2;
-      const x =
-        cx > end
-          ? clamp(
-              end - WIDTH + (cx % WIDTH) - width / 2,
-              end - WIDTH,
-              Math.max(end - WIDTH, end - width),
-            )
-          : cx - width / 2;
-      const y = (l.y + l.height / 2) * k - height / 2;
-      return keepOnCanvas({ ...l, width, height, x, y }, end, ASPECTS[aspect]);
-    }),
+    ...applyBento({ ...next, bento: { ...workspace.bento, tree } }),
+    scrapbook: {
+      layers: workspace.scrapbook.layers.map((l) => {
+        const width = l.width * k;
+        const height = l.height * k;
+        const cx = l.x + l.width / 2;
+        const x =
+          cx > end
+            ? clamp(
+                end - WIDTH + (cx % WIDTH) - width / 2,
+                end - WIDTH,
+                Math.max(end - WIDTH, end - width),
+              )
+            : cx - width / 2;
+        const y = (l.y + l.height / 2) * k - height / 2;
+        return keepOnCanvas({ ...l, width, height, x, y }, end, ASPECTS[aspect]);
+      }),
+    },
   };
 }
 // Moves a layer until at least GRAB px of its rotated bounding box (or all of it, if smaller)
@@ -361,7 +499,7 @@ export function coverCrop(
 }
 // Layers whose rotated frame, Scrapbook border or shadow can reach slide `slide`.
 export function slideLayers(workspace: Workspace, slide: number) {
-  return workspace.layers.filter((l) => {
+  return activeLayers(workspace).filter((l) => {
     const reach = Math.hypot(l.width + 24, l.height + 64) / 2 + 60;
     const cx = l.x + l.width / 2;
     return cx + reach > slide * WIDTH && cx - reach < (slide + 1) * WIDTH;
@@ -377,24 +515,25 @@ export function localPoint(layer: Layer, point: Point): Point {
   };
 }
 export function hitLayer(workspace: Workspace, point: Point): Layer | undefined {
-  return [...workspace.layers].reverse().find((l) => {
+  return [...activeLayers(workspace)].reverse().find((l) => {
     const p = localPoint(l, point);
     return Math.abs(p.x) <= l.width / 2 && Math.abs(p.y) <= l.height / 2;
   });
 }
 export function swapPhotos(workspace: Workspace, source: string, target: string): Workspace {
-  const a = workspace.layers.find((l) => l.id === source);
-  const b = workspace.layers.find((l) => l.id === target);
+  const layers = activeLayers(workspace);
+  const a = layers.find((l) => l.id === source);
+  const b = layers.find((l) => l.id === target);
   if (!a || !b || a === b) return workspace;
-  return {
-    ...workspace,
-    layers: workspace.layers.map((l) => {
+  return withLayers(
+    workspace,
+    layers.map((l) => {
       const source = l.id === a.id ? b : l.id === b.id ? a : undefined;
       return source
         ? { ...l, assetId: source.assetId, zoom: source.zoom, panX: source.panX, panY: source.panY }
         : l;
     }),
-  };
+  );
 }
 export function resizeLayer(
   layer: Layer,
@@ -443,7 +582,7 @@ export function reorderLayer(
   id: string,
   direction: 'front' | 'back' | 'forward' | 'backward',
 ): Workspace {
-  const layers = [...workspace.layers];
+  const layers = [...activeLayers(workspace)];
   const i = layers.findIndex((l) => l.id === id);
   if (i < 0) return workspace;
   const j =
@@ -454,5 +593,5 @@ export function reorderLayer(
         : clamp(i + (direction === 'forward' ? 1 : -1), 0, layers.length - 1);
   const [layer] = layers.splice(i, 1);
   layers.splice(j, 0, layer);
-  return { ...workspace, layers };
+  return withLayers(workspace, layers);
 }

@@ -2,7 +2,16 @@
   import { onMount } from 'svelte';
   import { resolve } from '$app/paths';
   import {
+    activeLayers,
+    addPhotos,
+    addToBento,
     layout,
+    regenerate,
+    removeAsset,
+    setSpacing,
+    withLayers,
+    BACKGROUNDS,
+    SPACING_MAX,
     TEMPLATES,
     clamp,
     type Template,
@@ -10,11 +19,13 @@
     ASPECTS,
     MAX_PHOTOS,
     MAX_SLIDES,
+    MIN_TILE,
     resize,
     type Aspect,
     type Asset,
     type Workspace,
     type Project,
+    type Spacing,
     type Style,
   } from '#lib/editor/model.ts';
   import { exportSlides, download, backup, zip } from '#lib/editor/render.ts';
@@ -25,6 +36,10 @@
   let assets = $state<Asset[]>([]);
   const blank = () => layout([], 'bento');
   let workspace = $state<Workspace>(blank());
+  // Live slider or color drag; history and autosave only see it on commit.
+  let preview = $state.raw<Workspace | null>(null);
+  let spacingHint = $state('');
+  const shown = $derived(preview ?? workspace);
   let style = $state<Style>('bento');
   let selected = $state('');
   let urls = $state<Record<string, string>>({});
@@ -46,7 +61,8 @@
   let release: (() => void) | undefined;
   let saveQueue = Promise.resolve();
   let saveTimer: ReturnType<typeof setTimeout>;
-  const layer = $derived(workspace.layers.find((l) => l.id === selected));
+  const placed = $derived(activeLayers(workspace));
+  const layer = $derived(placed.find((l) => l.id === selected));
   const canUndo = $derived(history.length > 0);
   const canRedo = $derived(future.length > 0);
   const sceneWidth = $derived(WIDTH * workspace.slides);
@@ -107,7 +123,7 @@
       workspace = saved.workspace;
       assets = saved.assets;
       style = saved.workspace.style;
-      selected = saved.workspace.layers[0]?.id ?? '';
+      selected = activeLayers(saved.workspace)[0]?.id ?? '';
     } else {
       workspace = blank();
       assets = [];
@@ -223,78 +239,92 @@
     if (key === 'x') value = clamp(value, 48 - layer.width, sceneWidth - 48);
     if (key === 'y') value = clamp(value, 48 - layer.height, sceneHeight - 48);
     remember();
-    workspace = {
-      ...workspace,
-      layers: workspace.layers.map((l) =>
-        l.id === selected ? { ...l, [key]: value } : l,
-      ),
-    };
+    workspace = withLayers(
+      workspace,
+      placed.map((l) => (l.id === selected ? { ...l, [key]: value } : l)),
+    );
     scheduleSave();
   }
   function commit(next: Workspace) {
+    preview = null;
     if (!editing || busy) return;
     remember();
     workspace = next;
     scheduleSave();
   }
   function placedAssets() {
-    return workspace.layers
+    return placed
       .map((l) => assets.find((a) => a.id === l.assetId)!)
       .filter(Boolean);
   }
   function changeStyle(value: Style) {
     if (!editing || busy || value === style) return;
+    const assetId = layer?.assetId;
     style = value;
-    commit(layout(placedAssets(), value, workspace.seed, undefined, workspace));
+    commit({ ...workspace, style: value });
+    selected = placed.find((l) => l.assetId === assetId)?.id ?? '';
   }
   function chooseTemplate(template: Template) {
     if (!editing || busy) return;
-    commit(
-      layout(placedAssets(), 'bento', workspace.seed, template, workspace),
-    );
+    commit(regenerate(workspace, placedAssets(), workspace.seed, template));
+  }
+  function dragSpacing(
+    input: HTMLInputElement,
+    key: keyof Spacing,
+    label: string,
+  ) {
+    const value = +input.value;
+    preview = setSpacing(workspace, key, value);
+    const actual = preview.bento[key];
+    input.value = String(actual);
+    spacingHint =
+      actual < value
+        ? `${label} stops at ${actual}px to keep every cell at least ${MIN_TILE}px.`
+        : '';
+  }
+  function commitSpacing(key: keyof Spacing) {
+    if (preview && preview.bento[key] !== workspace.bento[key]) commit(preview);
+    preview = null;
   }
   function changeSize(aspect: Aspect, slides: number) {
     if (aspect === workspace.aspect && slides === workspace.slides) return;
     const next = resize(workspace, aspect, slides);
-    const moved = workspace.layers.length - next.layers.length;
+    const moved = placed.length - activeLayers(next).length;
     if (moved)
       notice = `${moved} photo${moved === 1 ? '' : 's'} moved to your photo tray to keep Bento cells usable.`;
     commit(next);
   }
   function insertAsset(assetId: string) {
     if (!editing || busy) return;
-    const existing = workspace.layers.find((l) => l.assetId === assetId);
+    const existing = placed.find((l) => l.assetId === assetId);
     if (existing) {
       selected = existing.id;
       return;
     }
-    const asset = assets.find((a) => a.id === assetId)!;
+    error = '';
     if (style === 'scrapbook') {
+      const asset = assets.find((a) => a.id === assetId)!;
       const next = layout(
         [asset],
         'scrapbook',
-        workspace.seed + workspace.layers.length,
+        workspace.seed + placed.length,
         undefined,
         workspace,
-      ).layers[0];
+      ).scrapbook.layers[0];
       next.id = crypto.randomUUID();
       next.x = sceneWidth / 2 - next.width / 2;
       next.y = sceneHeight / 2 - next.height / 2;
-      commit({ ...workspace, layers: [...workspace.layers, next] });
+      commit(withLayers(workspace, [...placed, next]));
       selected = next.id;
     } else {
-      const next = layout(
-        [...placedAssets(), asset],
-        style,
-        workspace.seed,
-        workspace.template,
-        workspace,
-      );
-      if (!next.layers.some((l) => l.assetId === assetId)) {
-        error = `This Bento grid is full at ${workspace.layers.length} photos. Add a slide, pick a taller format or Scrapbook to fit more.`;
+      const next = addToBento(workspace, assetId, selected);
+      if (next === workspace) {
+        error = `Splitting ${layer ? 'this cell' : 'the largest cell'} would leave a cell under ${MIN_TILE}px, so the photo stays in your tray. Select a larger cell, reduce the gap or margin, or add a slide.`;
         return;
       }
       commit(next);
+      // The next add goes to the largest cell instead of halving this one again.
+      selected = '';
     }
   }
   async function add(files: FileList | File[]) {
@@ -303,34 +333,18 @@
     error = '';
     try {
       const added = await ingest(files, assets.length);
+      if (!added.length) return;
       assets = [...assets, ...added];
       remember();
-      if (style === 'scrapbook') {
-        const additions = layout(
-          added,
-          'scrapbook',
-          workspace.seed + assets.length,
-          undefined,
-          workspace,
-        ).layers.map((l) => ({ ...l, id: crypto.randomUUID() }));
-        workspace = {
-          ...workspace,
-          layers: [...workspace.layers, ...additions],
-        };
-        selected = additions[0]?.id ?? selected;
-      } else {
-        workspace = layout(
-          [...placedAssets(), ...added],
-          style,
-          workspace.seed,
-          workspace.template,
-          workspace,
-        );
-        selected = workspace.layers[0]?.id ?? '';
-        const unplaced = assets.length - workspace.layers.length;
-        if (unplaced)
-          notice = `${unplaced} photo${unplaced === 1 ? '' : 's'} did not fit the Bento grid and wait in your photo tray.`;
-      }
+      const before = placed.length;
+      workspace = addPhotos(workspace, added, selected);
+      // Same photo a reload would select; existing Bento stays unselected so the next add goes to the largest cell.
+      selected = style === 'bento' && before ? '' : (placed[before]?.id ?? '');
+      const unplaced = added.filter(
+        (a) => !placed.some((l) => l.assetId === a.id),
+      ).length;
+      if (unplaced)
+        notice = `${unplaced} photo${unplaced === 1 ? '' : 's'} did not fit the Bento grid and wait in your photo tray.`;
       await persist();
     } catch (e) {
       fail(e);
@@ -339,16 +353,26 @@
       if (input) input.value = '';
     }
   }
+  function removeFromLibrary(asset: Asset) {
+    if (
+      !editing ||
+      busy ||
+      !confirm(
+        `Remove ${asset.name} from this collage? This deletes it from both layouts and cannot be undone.`,
+      )
+    )
+      return;
+    workspace = removeAsset(workspace, asset.id);
+    assets = assets.filter((a) => a.id !== asset.id);
+    // Undo must never bring back a layer whose photo is gone.
+    history = history.map((w) => removeAsset(w, asset.id));
+    future = future.map((w) => removeAsset(w, asset.id));
+    scheduleSave();
+  }
   function shuffle() {
     if (!editing) return;
     remember();
-    workspace = layout(
-      placedAssets(),
-      style,
-      workspace.seed + 1,
-      undefined,
-      workspace,
-    );
+    workspace = regenerate(workspace, placedAssets(), workspace.seed + 1);
     scheduleSave();
   }
   function undo() {
@@ -622,16 +646,10 @@
           id="bento-template"
           class="select h-auto w-full border-primary/30 py-[9px] text-base leading-[1.45] text-secondary"
           aria-label="Bento template"
-          value={workspace.bento || !workspace.layers.length
-            ? (workspace.template ?? 'mosaic')
-            : ''}
+          value={workspace.bento.template}
           disabled={!editing || busy}
           onchange={(e) => chooseTemplate(e.currentTarget.value as Template)}
         >
-          {#if !workspace.bento && workspace.layers.length}<option
-              value=""
-              disabled>Original saved layout</option
-            >{/if}
           {#each TEMPLATES as template (template)}<option value={template}
               >{template[0].toUpperCase() + template.slice(1)}</option
             >{/each}
@@ -640,7 +658,61 @@
           Shuffle for a fresh arrangement. Drag the dividers to make it your
           own.
         </p>
+        <div class="sliders mt-5 grid gap-3">
+          {#each [['gap', 'Gap'], ['margin', 'Outer margin'], ['radius', 'Roundness']] as const as [key, label] (key)}
+            <label class={fieldLabel}>
+              <span class="flex justify-between"
+                >{label}<output>{shown.bento[key]}px</output></span
+              ><input
+                class="m-0.5 w-full accent-primary"
+                aria-label={label}
+                type="range"
+                min="0"
+                max={SPACING_MAX[key]}
+                step="1"
+                value={shown.bento[key]}
+                disabled={!editing || busy}
+                oninput={(e) => dragSpacing(e.currentTarget, key, label)}
+                onchange={() => commitSpacing(key)}
+              /></label
+            >
+          {/each}
+          {#if spacingHint}<p class="text-sm text-neutral" role="status">
+              {spacingHint}
+            </p>{/if}
+        </div>
       {/if}
+      <p class="mt-6 mb-[10px] text-sm tracking-[1.4px] text-neutral">
+        BACKGROUND
+      </p>
+      <div class="flex flex-wrap items-center gap-2">
+        {#each BACKGROUNDS as [name, color] (color)}
+          <button
+            class={[
+              'size-7 rounded-full border border-base-content/25',
+              shown.background === color &&
+                'outline-2 outline-offset-2 outline-primary',
+            ]}
+            style:background-color={color}
+            aria-label={`${name} background`}
+            aria-pressed={shown.background === color}
+            title={name}
+            disabled={!editing || busy}
+            onclick={() => commit({ ...workspace, background: color })}
+          ></button>
+        {/each}
+        <input
+          class="size-7 cursor-pointer rounded-full p-0"
+          type="color"
+          aria-label="Custom background color"
+          value={shown.background}
+          disabled={!editing || busy}
+          oninput={(e) =>
+            (preview = { ...workspace, background: e.currentTarget.value })}
+          onchange={(e) =>
+            commit({ ...workspace, background: e.currentTarget.value })}
+        />
+      </div>
       <p class="mt-6 mb-[10px] text-sm tracking-[1.4px] text-neutral">FORMAT</p>
       <div class="join grid w-full grid-cols-4" aria-label="Aspect ratio">
         {#each RATIOS as [value, hint] (value)}
@@ -730,29 +802,38 @@
       {#if assets.length}
         <div class="my-4 grid grid-cols-4 gap-[6px] max-[760px]:grid-cols-6">
           {#each assets as a (a.id)}
-            <button
-              class={[
-                'relative aspect-square overflow-hidden rounded-[6px] bg-base-200 p-0',
-                workspace.layers.some((l) => l.assetId === a.id)
-                  ? 'border border-primary/30'
-                  : 'border-2 border-dashed border-primary',
-              ]}
-              disabled={!editing || busy}
-              onclick={() => insertAsset(a.id)}
-              aria-label={`${workspace.layers.some((l) => l.assetId === a.id) ? 'Select' : 'Add back'} ${a.name}`}
-              title={a.name}
-            >
-              <img
-                class="size-full object-cover"
-                src={urls[a.id]}
-                alt={a.name}
-              /><span
-                class="absolute bottom-[2px] left-[2px] rounded-[3px] bg-base-100/80 px-1 py-px text-[12px]"
-                >{workspace.layers.some((l) => l.assetId === a.id)
-                  ? assets.indexOf(a) + 1
-                  : '+'}</span
+            <div class="relative">
+              <button
+                class={[
+                  'relative aspect-square w-full overflow-hidden rounded-[6px] bg-base-200 p-0',
+                  placed.some((l) => l.assetId === a.id)
+                    ? 'border border-primary/30'
+                    : 'border-2 border-dashed border-primary',
+                ]}
+                disabled={!editing || busy}
+                onclick={() => insertAsset(a.id)}
+                aria-label={`${placed.some((l) => l.assetId === a.id) ? 'Select' : 'Add back'} ${a.name}`}
+                title={a.name}
               >
-            </button>
+                <img
+                  class="size-full object-cover"
+                  src={urls[a.id]}
+                  alt={a.name}
+                /><span
+                  class="absolute bottom-[2px] left-[2px] rounded-[3px] bg-base-100/80 px-1 py-px text-[12px]"
+                  >{placed.some((l) => l.assetId === a.id)
+                    ? assets.indexOf(a) + 1
+                    : '+'}</span
+                >
+              </button>
+              <button
+                class="absolute top-0 right-0 grid size-6 place-items-center rounded-[4px] bg-base-100/85 text-sm leading-none text-secondary"
+                disabled={!editing || busy}
+                aria-label={`Remove ${a.name} from library`}
+                title="Remove from library"
+                onclick={() => removeFromLibrary(a)}>×</button
+              >
+            </div>
           {/each}
         </div>
         <p class="my-[1em] text-sm leading-[1.6] text-neutral">
@@ -799,7 +880,7 @@
         class="canvas-dots flex flex-1 flex-col px-6 pt-7 pb-2 max-[640px]:px-[14px] max-[640px]:pt-5 max-[640px]:pb-[5px] min-[1500px]:px-[35px] min-[1500px]:pt-[35px]"
       >
         <CanvasEditor
-          {workspace}
+          workspace={shown}
           {assets}
           bind:selected
           enabled={editing && !busy}
@@ -809,7 +890,7 @@
           onredo={redo}
         />
         <p class="mt-[19px] mb-3 text-center text-sm text-neutral">
-          {workspace.layers.length
+          {placed.length
             ? `One canvas, ${slideCount}. Photos can cross slide boundaries.`
             : 'A blank canvas. Add your photos to get started.'}
         </p>
@@ -868,7 +949,7 @@
         <div class="border-b border-base-300 px-6 py-4 max-[640px]:p-[15px]">
           <fieldset class="min-w-0 pt-3" disabled={!editing || busy}>
             <legend class="px-0.5 pt-[10px] pb-3 text-sm text-neutral"
-              >Make photo {workspace.layers.indexOf(layer) + 1} yours</legend
+              >Make photo {placed.indexOf(layer) + 1} yours</legend
             >
             <div class="sliders grid grid-cols-3 gap-5 max-[760px]:gap-3">
               <label class={fieldLabel}
@@ -1077,7 +1158,7 @@
     <div>
       <button
         class="ml-3 px-1.5 py-px text-neutral/90"
-        disabled={!workspace.layers.length || busy}
+        disabled={!assets.length || busy}
         onclick={exportBackup}>Download project backup</button
       ><button
         class="ml-3 px-1.5 py-px text-neutral/90"

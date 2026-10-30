@@ -3,16 +3,22 @@ import {
   ASPECTS,
   MAX_PHOTOS,
   MAX_SLIDES,
+  MIN_TILE,
+  SPACING_MAX,
+  TEMPLATES,
+  applyBento,
   type Asset,
+  type BentoNode,
   type Layer,
   type Project,
+  type Spacing,
   type Workspace,
 } from './model';
 import { blob } from './render';
 export const MASTER = 4096;
 export const PREVIEW = 1440;
 const db = () =>
-  openDB('living-carousel-v3', 1, {
+  openDB('living-carousel-v4', 1, {
     upgrade(db) {
       db.createObjectStore('project');
       db.createObjectStore('assets', { keyPath: 'id' });
@@ -20,6 +26,21 @@ const db = () =>
   });
 const finite = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n);
 const NUMBERS = ['x', 'y', 'width', 'height', 'rotation', 'zoom', 'panX', 'panY'] as const;
+const GEOMETRY = ['x', 'y', 'width', 'height', 'rotation'] as const;
+const TOLERANCE = 0.001;
+// Collects leaf ids; false for any malformed node.
+function treeLeaves(node: BentoNode | null | undefined, out: string[]): boolean {
+  if (!node || typeof node !== 'object') return false;
+  if ('layerId' in node) return out.push(node.layerId) > 0;
+  return (
+    (node.axis === 'x' || node.axis === 'y') &&
+    finite(node.ratio) &&
+    node.ratio > 0 &&
+    node.ratio < 1 &&
+    treeLeaves(node.first, out) &&
+    treeLeaves(node.second, out)
+  );
+}
 // Plain checks on what comes back from IndexedDB; any failure keeps the stored data untouched.
 export function validProject(
   record: unknown,
@@ -27,9 +48,16 @@ export function validProject(
 ): record is { workspace: Workspace } {
   const r = record as { workspace?: Workspace; assetIds?: unknown[] } | undefined;
   const ids = r?.assetIds;
-  const layers = r?.workspace?.layers;
-  const { aspect, slides = 0 } = r?.workspace ?? {};
-  if (!Array.isArray(ids) || !Array.isArray(layers) || ids.length > MAX_PHOTOS) return false;
+  const { aspect, slides = 0, style, background, bento, scrapbook } = r?.workspace ?? {};
+  if (!Array.isArray(ids) || ids.length > MAX_PHOTOS) return false;
+  if (!Array.isArray(bento?.layers) || !Array.isArray(scrapbook?.layers)) return false;
+  if (style !== 'bento' && style !== 'scrapbook') return false;
+  if (typeof background !== 'string' || !/^#[0-9a-f]{6}$/i.test(background)) return false;
+  if (!TEMPLATES.includes(bento.template)) return false;
+  const spacingOk = (Object.keys(SPACING_MAX) as (keyof Spacing)[]).every(
+    (k) => finite(bento[k]) && bento[k] >= 0 && bento[k] <= SPACING_MAX[k],
+  );
+  if (!spacingOk) return false;
   if (typeof aspect !== 'string' || !Object.hasOwn(ASPECTS, aspect)) return false;
   if (!Number.isInteger(slides) || slides < 1 || slides > MAX_SLIDES) return false;
   if (new Set(ids).size !== ids.length || ids.length !== assets.length) return false;
@@ -49,13 +77,31 @@ export function validProject(
       a.height <= MASTER
     );
   });
-  const layerIds = new Set<string>();
-  const layerOk = layers.every((l: Layer | null) => {
-    if (!l || typeof l !== 'object' || typeof l.id !== 'string' || layerIds.has(l.id)) return false;
-    layerIds.add(l.id);
-    return ids.includes(l.assetId) && NUMBERS.every((k) => finite(l[k]));
-  });
-  return assetOk && layerOk;
+  const layersOk = (layers: (Layer | null)[]) => {
+    const seen = new Set<string>();
+    return layers.every((l) => {
+      if (!l || typeof l !== 'object' || typeof l.id !== 'string' || seen.has(l.id)) return false;
+      seen.add(l.id);
+      return (
+        ids.includes(l.assetId) && NUMBERS.every((k) => finite(l[k])) && l.width > 0 && l.height > 0
+      );
+    });
+  };
+  // The tree and the Bento layers must describe exactly the same cells.
+  const leaves: string[] = [];
+  if (bento.tree !== undefined && !treeLeaves(bento.tree, leaves)) return false;
+  const cells = new Set(bento.layers.map((l) => l?.id));
+  const treeOk =
+    leaves.length === bento.layers.length &&
+    new Set(leaves).size === leaves.length &&
+    leaves.every((id) => cells.has(id));
+  if (!assetOk || !layersOk(bento.layers) || !layersOk(scrapbook.layers) || !treeOk) return false;
+  // The next Bento edit recomputes every cell from the tree, so the two must already agree.
+  return applyBento(r!.workspace!).bento.layers.every(
+    (cell, i) =>
+      GEOMETRY.every((k) => Math.abs(cell[k] - bento.layers[i][k]) <= TOLERANCE) &&
+      Math.min(cell.width, cell.height) >= MIN_TILE - TOLERANCE,
+  );
 }
 export async function loadProject(): Promise<Project | undefined> {
   const d = await db();
@@ -89,6 +135,10 @@ export async function saveProject(project: Project | null) {
     const stored = new Set(await assets.getAllKeys());
     const assetIds = project.assets.map((a) => a.id);
     await Promise.all([
+      // A photo removed from the library leaves the device too.
+      ...[...stored]
+        .filter((id) => !assetIds.includes(id as string))
+        .map((id) => assets.delete(id)),
       ...project.assets.filter((a) => !stored.has(a.id)).map((a) => assets.put(a)),
       tx.objectStore('project').put({ workspace: project.workspace, assetIds }, 'active'),
       tx.done,

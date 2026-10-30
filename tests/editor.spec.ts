@@ -132,8 +132,10 @@ async function saved(page: Page) {
     const path = '/src/lib/editor/storage.ts';
     const storage: typeof import('../apps/web/src/lib/editor/storage') = await import(path);
     const project = (await storage.loadProject())!;
+    const { workspace } = project;
     return {
-      workspace: project.workspace,
+      // Existing checks read the active layout's layers.
+      workspace: { ...workspace, layers: workspace[workspace.style].layers },
       assets: project.assets.map((a) => ({ id: a.id, name: a.name })),
     };
   });
@@ -314,24 +316,28 @@ test('transformed Scrapbook per-slide exports match the continuous composition a
   await page.getByLabel('Photo rotation', { exact: true }).fill('27');
   await page.getByLabel('Photo rotation', { exact: true }).press('Tab');
   await saved(page);
-  const pending = page.waitForEvent('download');
-  await page.getByRole('button', { name: /Download images/ }).click();
-  const stream = await (await pending).createReadStream();
-  const chunks = [];
-  for await (const c of stream!) chunks.push(c);
-  const files = unzipSync(Buffer.concat(chunks));
-  const slides = Object.keys(files)
-    .sort()
-    .map((name) => Buffer.from(files[name]).toString('base64'));
-  const differences = await page.evaluate(async (encoded) => {
+  const slides = (await exported(page)).map((f) => f.bytes.toString('base64'));
+  const results = await page.evaluate(async (encoded) => {
     const storage: typeof import('../apps/web/src/lib/editor/storage') = await import(
       '/src/lib/editor/storage.ts' as string
+    );
+    const model: typeof import('../apps/web/src/lib/editor/model') = await import(
+      '/src/lib/editor/model.ts' as string
     );
     const project = (await storage.loadProject())!;
     const path = '/src/lib/editor/render.ts';
     const renderer = await import(path);
     const wide = document.createElement('canvas');
     await renderer.draw(project, wide, 1);
+    // Rotated edges antialias differently under translation; this is the only place a larger difference is allowed.
+    const onRotatedEdge = (x: number, y: number) =>
+      project.workspace.scrapbook.layers.some((l) => {
+        const p = model.localPoint(l, { x: x + 0.5, y: y + 0.5 });
+        const outline = (left: number, top: number, right: number, bottom: number) =>
+          Math.abs(Math.max(left - p.x, p.x - right, top - p.y, p.y - bottom)) <= 3;
+        const [w, h] = [l.width / 2, l.height / 2];
+        return outline(-w, -h, w, h) || outline(-w - 12, -h - 12, w + 12, h + 32);
+      });
     const result = [];
     for (let i = 0; i < encoded.length; i++) {
       const blob = await (await fetch('data:image/png;base64,' + encoded[i])).blob();
@@ -344,54 +350,121 @@ test('transformed Scrapbook per-slide exports match the continuous composition a
       image.close();
       const actual = ctx.getImageData(0, 0, 1080, 1350).data;
       const expected = wide.getContext('2d')!.getImageData(i * 1080, 0, 1080, 1350).data;
-      // Rotated resampling is not bit-exact under translation, so allow faint isolated noise.
       let mismatch = 0;
       let max = 0;
+      let offEdge = 0;
       for (let p = 0; p < actual.length; p++) {
         const d = Math.abs(actual[p] - expected[p]);
         if (d > 1) mismatch++;
         max = Math.max(max, d);
+        const n = p >> 2;
+        if (d > 16 && !onRotatedEdge((n % 1080) + i * 1080, Math.floor(n / 1080))) offEdge++;
       }
-      result.push(max <= 16 && mismatch < actual.length / 2000);
+      result.push({ max, offEdge, rare: mismatch < actual.length / 2000 });
     }
     return result;
   }, slides);
-  expect(differences).toEqual([true, true, true]);
+  for (const { max, offEdge, rare } of results) {
+    expect(offEdge).toBe(0);
+    expect(max).toBeLessThanOrEqual(48);
+    expect(rare).toBe(true);
+  }
 });
-test('legacy workspaces retain their photos and transforms until a new Bento template is chosen', async ({
+test('a high-contrast photo crossing the seams lines up in exports and the editor paint', async ({
   page,
 }) => {
   await page.goto('/');
   await expect(page.getByLabel('Upload photos')).toBeEnabled();
-  await upload(page, 6);
-  const original = await saved(page);
-  await page.evaluate(async () => {
-    const r = indexedDB.open('living-carousel-v3', 1);
-    const db = await new Promise<IDBDatabase>((resolve) => (r.onsuccess = () => resolve(r.result)));
-    await new Promise<void>((resolve) => {
-      const tx = db.transaction('project', 'readwrite');
-      const store = tx.objectStore('project');
-      const get = store.get('active');
-      get.onsuccess = () => {
-        const p = get.result;
-        delete p.workspace.bento;
-        delete p.workspace.template;
-        store.put(p, 'active');
-      };
-      tx.oncomplete = () => resolve();
-    });
-    db.close();
+  const data = await page.evaluate(() => {
+    const c = document.createElement('canvas');
+    c.width = 1440;
+    c.height = 600;
+    const ctx = c.getContext('2d')!;
+    const colors = ['#000000', '#ffffff', '#ff0000', '#0000ff', '#00ff00'];
+    for (let x = 0; x < c.width; x += 12)
+      for (let y = 0; y < c.height; y += 12) {
+        ctx.fillStyle = colors[(x / 12 + (y / 12) * 2) % colors.length];
+        ctx.fillRect(x, y, 12, 12);
+      }
+    // One transparent pixel keeps master and preview lossless PNGs, so they decode identically.
+    ctx.clearRect(0, 0, 1, 1);
+    return c.toDataURL().split(',')[1];
   });
-  await page.reload();
-  await expect(page.getByLabel('Bento template')).toHaveValue('');
-  const restored = await saved(page);
-  expect(restored.workspace.layers).toEqual(original.workspace.layers);
-  expect(restored.assets).toEqual(original.assets);
-  await page.getByLabel('Bento template').selectOption('mosaic');
-  await expect(page.locator('.divider-handle')).toHaveCount(5);
-  expect((await saved(page)).assets).toEqual(original.assets);
+  await page.getByLabel('Upload photos').setInputFiles({
+    name: 'checks.png',
+    mimeType: 'image/png',
+    buffer: Buffer.from(data, 'base64'),
+  });
+  await expect(page.locator('.photo-hit')).toHaveCount(1);
+  const compare = async () => {
+    await saved(page);
+    const slides = (await exported(page)).map((f) => f.bytes.toString('base64'));
+    return page.evaluate(async (encoded) => {
+      const storage: typeof import('../apps/web/src/lib/editor/storage') = await import(
+        '/src/lib/editor/storage.ts' as string
+      );
+      const project = (await storage.loadProject())!;
+      const path = '/src/lib/editor/render.ts';
+      const renderer = await import(path);
+      const canvas = (width: number) =>
+        Object.assign(document.createElement('canvas'), { width, height: 1350 });
+      const read = (c: HTMLCanvasElement, x = 0, width = c.width) =>
+        c.getContext('2d')!.getImageData(x, 0, width, 1350).data;
+      const worst = (a: ArrayLike<number>, b: ArrayLike<number>) => {
+        let max = 0;
+        for (let p = 0; p < a.length; p++) max = Math.max(max, Math.abs(a[p] - b[p]));
+        return max;
+      };
+      const strip = canvas(3240);
+      for (let i = 0; i < encoded.length; i++) {
+        const blob = await (await fetch('data:image/png;base64,' + encoded[i])).blob();
+        const image = await createImageBitmap(blob);
+        strip.getContext('2d')!.drawImage(image, i * 1080, 0);
+        image.close();
+      }
+      const wide = document.createElement('canvas');
+      await renderer.draw(project, wide, 1);
+      // The editor's own decode and paint, 1:1 over the whole strip and over each seam.
+      const images = await renderer.syncPreviews(
+        renderer.previewCache(),
+        project.assets,
+        () => 1440,
+      );
+      const painted = [
+        [0, 3240],
+        [900, 360],
+        [1980, 360],
+      ].map(([x, width]) => {
+        const view = canvas(width);
+        renderer.paint(project, images, view, { x: -x, y: 0, scale: 1 });
+        return worst(read(view), read(strip, x, width));
+      });
+      return {
+        draw: worst(read(strip), read(wide)),
+        painted,
+        // The seam must carry real contrast, or the limits above would prove nothing.
+        contrast: [1080, 2160].map((seam) => {
+          const band = read(strip, seam - 8, 16).filter((_, p) => p % 4 === 0);
+          return Math.max(...band) - Math.min(...band);
+        }),
+      };
+    }, slides);
+  };
+  const bento = await compare();
+  expect(bento.draw).toBeLessThanOrEqual(16);
+  for (const d of bento.painted) expect(d).toBeLessThanOrEqual(16);
+  for (const c of bento.contrast) expect(c).toBeGreaterThan(200);
+  await page.getByRole('button', { name: /Scrapbook/ }).click();
+  await saved(page);
+  await page.getByLabel('Photo position X', { exact: true }).fill('900');
+  await page.getByLabel('Photo position X', { exact: true }).press('Tab');
+  await page.getByLabel('Photo rotation', { exact: true }).fill('0');
+  await page.getByLabel('Photo rotation', { exact: true }).press('Tab');
+  const scrapbook = await compare();
+  expect(scrapbook.draw).toBeLessThanOrEqual(16);
+  for (const d of scrapbook.painted) expect(d).toBeLessThanOrEqual(16);
+  expect(scrapbook.contrast[0]).toBeGreaterThan(200);
 });
-
 test('Bento touch dragging shows a photo above the finger and swaps on release', async ({
   browser,
 }) => {
@@ -646,7 +719,7 @@ test('an unreadable saved collage shows an error and is not overwritten by autos
     page.evaluate(
       (change) =>
         new Promise<unknown>((resolve, reject) => {
-          const open = indexedDB.open('living-carousel-v3');
+          const open = indexedDB.open('living-carousel-v4');
           open.onerror = () => reject(open.error);
           open.onsuccess = () => {
             const store = open.result.transaction('project', 'readwrite').objectStore('project');
@@ -654,10 +727,16 @@ test('an unreadable saved collage shows an error and is not overwritten by autos
             get.onsuccess = () => {
               if (change)
                 store.put(
-                  { ...get.result, workspace: { ...get.result.workspace, layers: [null] } },
+                  {
+                    ...get.result,
+                    workspace: {
+                      ...get.result.workspace,
+                      bento: { ...get.result.workspace.bento, layers: [null] },
+                    },
+                  },
                   'active',
                 );
-              resolve(get.result.workspace.layers);
+              resolve(get.result.workspace.bento.layers);
               open.result.close();
             };
           };
@@ -864,4 +943,249 @@ test('tabbing to a photo or divider outside the zoomed view pans it into view', 
     expect(inside((await focused.boundingBox())!)).toBe(true);
   }
   expect(seen).toEqual(expect.arrayContaining(hidden));
+});
+
+// Reads an exported PNG's pixel in the page, since Node has no decoder here.
+const pixel = (page: Page, png: Buffer, x: number, y: number) =>
+  page.evaluate(
+    async ({ data, x, y }) => {
+      const blob = await (await fetch('data:image/png;base64,' + data)).blob();
+      const image = await createImageBitmap(blob);
+      const canvas = document.createElement('canvas');
+      canvas.width = image.width;
+      canvas.height = image.height;
+      const ctx = canvas.getContext('2d')!;
+      ctx.drawImage(image, 0, 0);
+      return [...ctx.getImageData(x, y, 1, 1).data].slice(0, 3);
+    },
+    { data: png.toString('base64'), x, y },
+  );
+test('deleting a Bento cell returns its photo to the tray in one undo step and add back splits a cell', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await upload(page, 4);
+  const before = await saved(page);
+  const [first, ...others] = before.workspace.layers;
+  const name = before.assets.find((a) => a.id === first.assetId)!.name;
+  await page.locator(`[data-layer-id="${first.id}"]`).click();
+  await page.getByRole('button', { name: 'Delete photo', exact: true }).click();
+  await expect(page.locator('.photo-hit')).toHaveCount(3);
+  await expect(page.getByRole('button', { name: `Add back ${name}`, exact: true })).toBeVisible();
+  let w = (await saved(page)).workspace;
+  expect(w.layers.map((l) => l.id)).toEqual(others.map((l) => l.id));
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expect(page.locator('.photo-hit')).toHaveCount(4);
+  await expect(page.getByRole('button', { name: `Select ${name}`, exact: true })).toBeVisible();
+  expect((await saved(page)).workspace).toEqual(before.workspace);
+  // The keyboard deletes too.
+  await page.locator(`[data-layer-id="${first.id}"]`).click();
+  await page.keyboard.press('Delete');
+  await expect(page.locator('.photo-hit')).toHaveCount(3);
+  w = (await saved(page)).workspace;
+  const largest = [...w.layers].sort((a, b) => b.width * b.height - a.width * a.height)[0];
+  await page.getByRole('button', { name: `Add back ${name}`, exact: true }).click();
+  await expect(page.locator('.photo-hit')).toHaveCount(4);
+  const after = (await saved(page)).workspace;
+  expect(after.layers.at(-1)!.assetId).toBe(first.assetId);
+  const split = after.layers.find((l) => l.id === largest.id)!;
+  expect(split.width * split.height).toBeLessThan((largest.width * largest.height) / 1.9);
+  for (const l of w.layers)
+    if (l.id !== largest.id) expect(after.layers.find((c) => c.id === l.id)).toEqual(l);
+  // Delete down to nothing: background only.
+  for (const l of after.layers) {
+    await page.locator(`[data-layer-id="${l.id}"]`).click();
+    await page.getByRole('button', { name: 'Delete photo', exact: true }).click();
+  }
+  await expect(page.locator('.photo-hit')).toHaveCount(0);
+  await expect(page.locator('.count')).toHaveText('4/100');
+});
+test('uploads fill Bento by splitting, the rest wait in the tray and add back is then blocked', async ({
+  page,
+}) => {
+  test.setTimeout(60_000);
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await page.getByRole('button', { name: /^1:1/ }).click();
+  await page.getByRole('button', { name: 'Remove a slide' }).click();
+  await page.getByRole('button', { name: 'Remove a slide' }).click();
+  await upload(page, 6);
+  await dispatchFiles(page, 'drop', 45);
+  await expect(page.locator('.count')).toHaveText('51/100');
+  await expect(page.getByRole('status').filter({ hasText: 'did not fit' })).toBeVisible();
+  const placed = await page.locator('.photo-hit').count();
+  expect(placed).toBeGreaterThan(6);
+  expect(placed).toBeLessThan(51);
+  const w = (await saved(page)).workspace;
+  for (const l of w.layers) expect(Math.min(l.width, l.height)).toBeGreaterThanOrEqual(120);
+  // Scrapbook has no minimum, so it took every upload.
+  expect(w.scrapbook.layers).toHaveLength(51);
+  await page
+    .getByRole('button', { name: /^Add back / })
+    .first()
+    .click();
+  await expect(page.getByRole('alert')).toContainText('under 120px');
+  await expect(page.locator('.photo-hit')).toHaveCount(placed);
+});
+test('spacing sliders preview live, commit once and export at full width', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await upload(page, 4);
+  const before = (await saved(page)).workspace;
+  const gap = page.getByLabel('Gap', { exact: true });
+  await expect(gap).toHaveValue('12');
+  await expect(page.getByLabel('Outer margin', { exact: true })).toHaveValue('24');
+  await expect(page.getByLabel('Roundness', { exact: true })).toHaveValue('0');
+  // Input events alone preview without a history step or a save.
+  await gap.evaluate((el: HTMLInputElement) => {
+    for (const value of ['20', '30', '40']) {
+      el.value = value;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  });
+  await expect(page.getByText('40px', { exact: true })).toBeVisible();
+  expect((await saved(page)).workspace.bento.gap).toBe(12);
+  await gap.evaluate((el) => el.dispatchEvent(new Event('change', { bubbles: true })));
+  await expect.poll(async () => (await saved(page)).workspace.bento.gap).toBe(40);
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  expect((await saved(page)).workspace).toEqual(before);
+  await gap.fill('0');
+  await expect.poll(async () => (await saved(page)).workspace.bento.gap).toBe(0);
+  await page.getByLabel('Roundness', { exact: true }).fill('30');
+  await expect.poll(async () => (await saved(page)).workspace.bento.radius).toBe(30);
+  const zero = (await saved(page)).workspace;
+  // Dividers stay usable with no gap to sit in.
+  const handle = page.locator('.divider-handle').first();
+  const label = (await handle.getAttribute('aria-label'))!;
+  await drag(page, `[aria-label="${label}"]`, 30, 30);
+  await expect
+    .poll(async () => (await saved(page)).workspace.layers.map((l) => [l.width, l.height]))
+    .not.toEqual(zero.layers.map((l) => [l.width, l.height]));
+  const files = await exported(page);
+  expect(files).toHaveLength(3);
+  for (const f of files) expect(f.size).toEqual([1080, 1350]);
+  // The editor paints the photos, not only the background.
+  await expect
+    .poll(() =>
+      page.getByLabel('Your continuous 3-slide collage').evaluate((el) => {
+        const c = el as HTMLCanvasElement;
+        const { data } = c.getContext('2d')!.getImageData(0, 0, c.width, c.height);
+        const colors = new Set<number>();
+        for (let i = 0; i < data.length; i += 400)
+          colors.add(data[i] * 65536 + data[i + 1] * 256 + data[i + 2]);
+        return colors.size;
+      }),
+    )
+    .toBeGreaterThan(20);
+  await page.screenshot({ path: 'test-results/bento-spacing.png', fullPage: true });
+  const w = (await saved(page)).workspace;
+  await page.reload();
+  await expect(page.getByLabel('Gap', { exact: true })).toHaveValue('0');
+  expect((await saved(page)).workspace).toEqual(w);
+});
+test('a Bento divider dragged to its limit saves, reloads and stays valid', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await upload(page, 4);
+  const before = (await saved(page)).workspace;
+  const label = (await page.locator('.divider-handle').first().getAttribute('aria-label'))!;
+  await drag(page, `[aria-label="${label}"]`, -5000, -5000);
+  await expect
+    .poll(async () => (await saved(page)).workspace.layers.map((l) => [l.width, l.height]))
+    .not.toEqual(before.layers.map((l) => [l.width, l.height]));
+  const w = (await saved(page)).workspace;
+  expect(Math.min(...w.layers.flatMap((l) => [l.width, l.height]))).toBeCloseTo(120, 6);
+  await page.reload();
+  await expect(page.locator('.photo-hit')).toHaveCount(4);
+  await expect(page.getByText('The collage saved on this device is unreadable.')).toHaveCount(0);
+  expect((await saved(page)).workspace).toEqual(w);
+});
+test('the background swatch and picker set exported margin pixels in both styles', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await upload(page, 3);
+  expect(await pixel(page, (await exported(page))[0].bytes, 5, 5)).toEqual([0xf3, 0xee, 0xe4]);
+  await page.getByRole('button', { name: 'Ink background' }).click();
+  await expect.poll(async () => (await saved(page)).workspace.background).toBe('#1c1a17');
+  expect(await pixel(page, (await exported(page))[0].bytes, 5, 5)).toEqual([0x1c, 0x1a, 0x17]);
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expect.poll(async () => (await saved(page)).workspace.background).toBe('#f3eee4');
+  await page.getByLabel('Custom background color').fill('#336699');
+  await expect.poll(async () => (await saved(page)).workspace.background).toBe('#336699');
+  expect(await pixel(page, (await exported(page))[0].bytes, 5, 5)).toEqual([0x33, 0x66, 0x99]);
+  // Shuffle and a style switch keep the color.
+  await page.getByRole('button', { name: /Shuffle layout/ }).click();
+  await page.getByRole('button', { name: /Scrapbook/ }).click();
+  await expect.poll(async () => (await saved(page)).workspace.background).toBe('#336699');
+});
+test('switching style restores each layout and new photos reach both', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await upload(page, 4);
+  await page.getByLabel('Gap', { exact: true }).fill('30');
+  await expect.poll(async () => (await saved(page)).workspace.bento.gap).toBe(30);
+  await page.getByRole('button', { name: /Scrapbook/ }).click();
+  const scrap = (await saved(page)).workspace;
+  await drag(page, `[data-layer-id="${scrap.layers[1].id}"]`, 60, 25);
+  await expect
+    .poll(async () => (await saved(page)).workspace.layers[1].x)
+    .not.toBe(scrap.layers[1].x);
+  const moved = (await saved(page)).workspace;
+  await page.getByRole('button', { name: /Bento/ }).click();
+  await expect(page.getByLabel('Gap', { exact: true })).toHaveValue('30');
+  const bento = (await saved(page)).workspace;
+  expect(bento.bento).toEqual(moved.bento);
+  expect(bento.layers).toEqual(moved.bento.layers);
+  await page.getByRole('button', { name: /Scrapbook/ }).click();
+  await expect.poll(async () => (await saved(page)).workspace.style).toBe('scrapbook');
+  expect((await saved(page)).workspace.layers).toEqual(moved.layers);
+  // A photo added here is placed in the Bento layout as well.
+  await page.getByLabel('Upload photos').setInputFiles({
+    name: 'late.png',
+    mimeType: 'image/png',
+    buffer: Buffer.from(
+      await page.evaluate(() => {
+        const c = document.createElement('canvas');
+        c.width = c.height = 200;
+        return c.toDataURL().split(',')[1];
+      }),
+      'base64',
+    ),
+  });
+  await expect(page.locator('.photo-hit')).toHaveCount(5);
+  const both = await saved(page);
+  const late = both.assets.find((a) => a.name === 'late.png')!;
+  expect(both.workspace.scrapbook.layers.some((l) => l.assetId === late.id)).toBe(true);
+  expect(both.workspace.bento.layers.some((l) => l.assetId === late.id)).toBe(true);
+  // Removing it from the library clears both layouts, undo history and the device.
+  page.once('dialog', (d) => d.accept());
+  await page.getByRole('button', { name: 'Remove late.png from library' }).click();
+  await expect(page.locator('.photo-hit')).toHaveCount(4);
+  await expect(page.locator('.count')).toHaveText('4/100');
+  const gone = await saved(page);
+  expect(gone.assets.some((a) => a.id === late.id)).toBe(false);
+  expect(gone.workspace.bento.layers.some((l) => l.assetId === late.id)).toBe(false);
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expect(page.locator('.photo-hit')).toHaveCount(4);
+  const stored = await page.evaluate(
+    () =>
+      new Promise<number>((resolve) => {
+        const open = indexedDB.open('living-carousel-v4');
+        open.onsuccess = () => {
+          const count = open.result.transaction('assets').objectStore('assets').count();
+          count.onsuccess = () => {
+            open.result.close();
+            resolve(count.result);
+          };
+        };
+      }),
+  );
+  expect(stored).toBe(4);
 });

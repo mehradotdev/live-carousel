@@ -1,5 +1,6 @@
 import { zipSync } from 'fflate';
 import {
+  activeLayers,
   coverCrop,
   slideLayers,
   slideSize,
@@ -68,7 +69,7 @@ function paintLayer(
     -layer.height / 2,
     layer.width,
     layer.height,
-    workspace.style === 'bento' ? 12 : 0,
+    workspace.style === 'bento' ? workspace.bento.radius : 0,
   );
   ctx.clip();
   ctx.drawImage(
@@ -105,7 +106,7 @@ export function paint(
   ctx.beginPath();
   ctx.rect(0, 0, width * workspace.slides, height);
   ctx.clip();
-  for (const layer of workspace.layers) {
+  for (const layer of activeLayers(workspace)) {
     const image = images.get(layer.assetId);
     const asset = assets.find((a) => a.id === layer.assetId);
     // A closed bitmap (replaced by a sharper decode) has zero size.
@@ -120,7 +121,7 @@ export async function draw(
   canvas: HTMLCanvasElement,
   scale = 1,
   slide?: number,
-  layers = workspace.layers,
+  layers = activeLayers(workspace),
 ) {
   const ctx = begin(workspace, canvas, scale, slide);
   for (const layer of layers) {
@@ -138,7 +139,7 @@ export async function draw(
 export function previewEdges({ workspace, assets }: Project, view: View, viewport: Size) {
   const visible = visibleRect(view, viewport);
   const edges = new Map<string, number>();
-  for (const layer of workspace.layers) {
+  for (const layer of activeLayers(workspace)) {
     const asset = assets.find((a) => a.id === layer.assetId);
     if (!asset || !reaches(layer, visible)) continue;
     const crop = coverCrop(

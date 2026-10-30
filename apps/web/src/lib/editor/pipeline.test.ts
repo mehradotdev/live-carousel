@@ -1,5 +1,24 @@
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
-import { ASPECTS, WIDTH, slideLayers, type Asset, type Layer, type Workspace } from './model';
+import {
+  ASPECTS,
+  MIN_TILE,
+  TEMPLATES,
+  WIDTH,
+  addToBento,
+  applyBento,
+  dividers,
+  layout,
+  removeLayer,
+  resize,
+  resizeDivider,
+  setSpacing,
+  slideLayers,
+  type Aspect,
+  type Asset,
+  type BentoNode,
+  type Layer,
+  type Workspace,
+} from './model';
 import { draw, paint, previewCache, previewEdges, sourceRect, syncPreviews } from './render';
 import { fit, MASTER, PREVIEW, transparent, validProject } from './storage';
 const layer = (x: number, extra: Partial<Layer> = {}): Layer => ({
@@ -67,7 +86,7 @@ describe('image pipeline', () => {
         slides,
         style: 'bento',
         background: '#fff',
-        layers: [],
+        bento: { layers: [], radius: 0 },
       } as unknown as Workspace;
       for (let i = 0; i < slides; i++) {
         const calls: [string, unknown[]][] = [];
@@ -86,7 +105,13 @@ describe('image pipeline', () => {
     const calls: [string, unknown[]][] = [];
     const canvas = Object.assign(recorder(calls), { width: 800, height: 600 });
     const layers = [layer(0), layer(3 * WIDTH, { id: 'far' })];
-    const workspace = { aspect: '4:5', slides: 4, style: 'bento', background: '#fff', layers };
+    const workspace = {
+      aspect: '4:5',
+      slides: 4,
+      style: 'bento',
+      background: '#fff',
+      bento: { layers, radius: 0 },
+    };
     const image = { width: 1440, height: 960 } as ImageBitmap;
     paint(
       { workspace: workspace as unknown as Workspace, assets: [asset] },
@@ -104,8 +129,46 @@ describe('image pipeline', () => {
     expect(keys.indexOf('rect')).toBeLessThan(keys.indexOf('drawImage'));
     expect(keys.lastIndexOf('restore')).toBeGreaterThan(keys.indexOf('drawImage'));
   });
+  it('roundness clips each Bento cell in the shared paint, and only in Bento', async () => {
+    const image = { width: 1440, height: 960, close() {} } as ImageBitmap;
+    vi.stubGlobal('createImageBitmap', async () => image);
+    const project = (style: string) => ({
+      workspace: {
+        aspect: '4:5',
+        slides: 1,
+        style,
+        background: '#fff',
+        bento: { layers: [layer(0)], radius: 30 },
+        scrapbook: { layers: [layer(0)] },
+      } as unknown as Workspace,
+      assets: [asset],
+    });
+    const radii = async (style: string) => {
+      const exported: [string, unknown[]][] = [];
+      await draw(project(style), recorder(exported), 1, 0);
+      const previewed: [string, unknown[]][] = [];
+      paint(
+        project(style),
+        new Map([['a', image]]),
+        Object.assign(recorder(previewed), { width: 800, height: 600 }),
+        { x: 0, y: 0, scale: 1 },
+      );
+      return [exported, previewed].map((calls) => {
+        const keys = calls.map(([k]) => k);
+        expect(keys.indexOf('clip', keys.indexOf('roundRect'))).toBeLessThan(
+          keys.indexOf('drawImage'),
+        );
+        return calls.find(([k]) => k === 'roundRect')![1][4];
+      });
+    };
+    expect(await radii('bento')).toEqual([30, 30]);
+    expect(await radii('scrapbook')).toEqual([0, 0]);
+  });
   it('sizes previews for on-screen layers at the current zoom, in coarse steps up to the stored preview', () => {
-    const workspace = { layers: [layer(0), layer(12 * WIDTH, { id: 'far', assetId: 'b' })] };
+    const workspace = {
+      style: 'bento',
+      bento: { layers: [layer(0), layer(12 * WIDTH, { id: 'far', assetId: 'b' })] },
+    };
     const project = {
       workspace: workspace as unknown as Workspace,
       assets: [asset, { ...asset, id: 'b' }],
@@ -120,7 +183,10 @@ describe('image pipeline', () => {
   it('decodes only the layers that can reach a slide, including seam-crossing ones', () => {
     const seam = layer(WIDTH - 200, { rotation: 27 });
     const far = layer(2 * WIDTH + 300);
-    const w = { layers: [layer(100), seam, far] } as Workspace;
+    const w = {
+      style: 'scrapbook',
+      scrapbook: { layers: [layer(100), seam, far] },
+    } as unknown as Workspace;
     expect(slideLayers(w, 0).map((l) => l.id)).toEqual(['l100', seam.id]);
     expect(slideLayers(w, 1).map((l) => l.id)).toEqual([seam.id]);
     expect(slideLayers(w, 2).map((l) => l.id)).toEqual([far.id]);
@@ -137,7 +203,11 @@ describe('image pipeline', () => {
       (id) => ({ ...asset, id, masterBlob: { id } }) as unknown as Asset,
     );
     const layers = [layer(0), layer(1, { assetId: 'b' }), layer(2)];
-    const workspace = { style: 'bento', background: '#fff', layers } as unknown as Workspace;
+    const workspace = {
+      style: 'bento',
+      background: '#fff',
+      bento: { layers, radius: 0 },
+    } as unknown as Workspace;
     const original = calls.push.bind(calls);
     calls.push = (...c) => (c[0][0] === 'drawImage' && events.push('paint'), original(...c));
     await draw({ workspace, assets }, canvas, 1, 0);
@@ -215,7 +285,24 @@ describe('image pipeline', () => {
   });
   it('rejects saved projects that would break the editor', () => {
     const good = () => ({
-      record: { workspace: { aspect: '4:5', slides: 3, layers: [layer(0)] }, assetIds: ['a'] },
+      record: {
+        workspace: {
+          aspect: '4:5',
+          slides: 3,
+          style: 'bento',
+          background: '#f3eee4',
+          bento: {
+            layers: [layer(0, { x: 24, y: 24, width: 3192, height: 1302 })],
+            tree: { layerId: 'l0' } as BentoNode | undefined,
+            template: 'mosaic',
+            gap: 12,
+            margin: 24,
+            radius: 0,
+          },
+          scrapbook: { layers: [layer(0)] },
+        },
+        assetIds: ['a'],
+      },
       assets: [{ ...asset, name: 'a.jpg', masterBlob: new Blob(), previewBlob: new Blob() }],
     });
     const ok = good();
@@ -225,11 +312,38 @@ describe('image pipeline', () => {
       (p) => (p.record.workspace.slides = 0),
       (p) => (p.record.workspace.slides = 21),
       (p) => (p.record.workspace.slides = 2.5),
-      (p) => ((p.record.workspace.layers as unknown[]) = [null]),
-      (p) => (p.record.workspace.layers[0].zoom = NaN),
-      (p) => ((p.record.workspace.layers[0] as unknown as { x: string }).x = '10'),
-      (p) => (p.record.workspace.layers[0].assetId = 'missing'),
-      (p) => p.record.workspace.layers.push(layer(0)),
+      (p) => ((p.record.workspace.bento.layers as unknown[]) = [null]),
+      (p) => (p.record.workspace.bento.layers[0].zoom = NaN),
+      (p) => ((p.record.workspace.bento.layers[0] as unknown as { x: string }).x = '10'),
+      (p) => (p.record.workspace.bento.layers[0].assetId = 'missing'),
+      (p) => p.record.workspace.bento.layers.push(layer(0)),
+      (p) => p.record.workspace.scrapbook.layers.push(layer(0)),
+      (p) => (p.record.workspace.scrapbook.layers[0].x = NaN),
+      (p) => (p.record.workspace.style = 'grid'),
+      (p) => (p.record.workspace.bento.template = 'spiral'),
+      (p) => (p.record.workspace.bento.gap = -1),
+      (p) => (p.record.workspace.bento.gap = 61),
+      (p) => (p.record.workspace.bento.margin = 121),
+      (p) => (p.record.workspace.bento.radius = 61),
+      (p) => (p.record.workspace.bento.radius = NaN),
+      (p) => (p.record.workspace.background = 'red'),
+      (p) => (p.record.workspace.background = '#fff'),
+      (p) => (p.record.workspace.bento.tree = undefined),
+      (p) => (p.record.workspace.bento.tree = { layerId: 'ghost' }),
+      (p) => ((p.record.workspace.bento.tree as unknown) = { axis: 'x' }),
+      (p) => {
+        const leaf = { layerId: 'l0' };
+        p.record.workspace.bento.tree = { axis: 'x', ratio: 0.5, first: leaf, second: leaf };
+      },
+      (p) => {
+        p.record.workspace.bento.tree = {
+          axis: 'x',
+          ratio: 2,
+          first: { layerId: 'l0' },
+          second: { layerId: 'l1' },
+        };
+        p.record.workspace.bento.layers.push(layer(1));
+      },
       (p) => ((p.assets[0] as { width: unknown }).width = '4096'),
       (p) => (p.assets[0].height = Infinity),
       (p) => (p.assets[0].width = MASTER + 1),
@@ -249,5 +363,85 @@ describe('image pipeline', () => {
       change(p);
       expect(validProject(p.record, p.assets)).toBe(false);
     }
+    // Trees whose cells disagree with the stored rectangles or fall below the minimum.
+    const split = (p: ReturnType<typeof good>, ratio: number, stored = ratio) => {
+      const { workspace } = p.record;
+      const cells = (r: number) => {
+        const tree: BentoNode = {
+          axis: 'x',
+          ratio: r,
+          first: { layerId: 'l0' },
+          second: { layerId: 'l1' },
+        };
+        const layers = [layer(0), layer(1)];
+        return applyBento({
+          ...workspace,
+          bento: { ...workspace.bento, tree, layers },
+        } as unknown as Workspace).bento;
+      };
+      workspace.bento = { ...workspace.bento, ...cells(ratio), layers: cells(stored).layers };
+    };
+    const drifted: ((p: ReturnType<typeof good>) => void)[] = [
+      (p) => split(p, 0.001, 0.5),
+      (p) => split(p, 0.001),
+      (p) => split(p, 0.999),
+      (p) => (p.record.workspace.bento.layers[0].x += 1),
+      (p) => (p.record.workspace.bento.layers[0].height -= 1),
+      (p) => (p.record.workspace.bento.layers[0].rotation = 5),
+      (p) => (p.record.workspace.bento.margin = 30),
+      (p) => (p.record.workspace.aspect = '1:1'),
+      (p) => (p.record.workspace.slides = 2),
+      (p) => {
+        split(p, 0.5);
+        p.record.workspace.bento.gap = 40;
+      },
+      (p) => (p.record.workspace.bento.layers[0].width = 0),
+      (p) => (p.record.workspace.bento.layers[0].height = -1),
+      (p) => (p.record.workspace.scrapbook.layers[0].width = 0),
+      (p) => (p.record.workspace.scrapbook.layers[0].height = -1),
+    ];
+    for (const change of drifted) {
+      const p = good();
+      change(p);
+      expect(validProject(p.record, p.assets)).toBe(false);
+    }
+    const consistent = good();
+    split(consistent, 0.5);
+    expect(validProject(consistent.record, consistent.assets)).toBe(true);
+  });
+  it('accepts every Bento the editor can save, including dividers dragged to their limits', () => {
+    const assets = Array.from({ length: 8 }, (_, i) => ({
+      ...asset,
+      id: `a${i}`,
+      name: `${i}.jpg`,
+      masterBlob: new Blob(),
+      previewBlob: new Blob(),
+    }));
+    const passes = (workspace: Workspace, kept = assets) =>
+      expect(
+        validProject(structuredClone({ workspace, assetIds: kept.map((a) => a.id) }), kept),
+      ).toBe(true);
+    const sides = (w: Workspace) => w.bento.layers.flatMap((l) => [l.width, l.height]);
+    for (const aspect of Object.keys(ASPECTS) as Aspect[])
+      for (const template of TEMPLATES)
+        for (const seed of [0, 1, 2]) {
+          let w = layout(assets, 'bento', seed, template, { aspect, slides: 2 });
+          passes(w);
+          for (const end of [-Infinity, Infinity])
+            for (const { path } of dividers(w)) {
+              w = resizeDivider(w, path, end);
+              passes(w);
+            }
+          // At its limit a divider leaves a cell at exactly the minimum.
+          expect(Math.min(...sides(w))).toBeCloseTo(MIN_TILE, 6);
+          w = setSpacing(setSpacing(w, 'gap', 60), 'margin', 120);
+          passes(w);
+          const [first] = w.bento.layers;
+          const removed = removeLayer(w, first.id);
+          passes(removed);
+          passes(addToBento(removed, first.assetId));
+          passes(resize(w, '1:1', 1));
+          passes(resize(w, aspect, 20));
+        }
   });
 });

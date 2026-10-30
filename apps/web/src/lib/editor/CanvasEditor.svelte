@@ -2,6 +2,9 @@
   import { onMount, untrack } from 'svelte';
   import {
     WIDTH,
+    activeLayers,
+    removeLayer,
+    withLayers,
     slideSize,
     coverCrop,
     clamp,
@@ -93,7 +96,7 @@
   const draggedLayer = $derived.by(() => {
     const g = gesture;
     return g?.kind === 'swap'
-      ? g.base.layers.find((l) => l.id === g.id)
+      ? activeLayers(g.base).find((l) => l.id === g.id)
       : undefined;
   });
   const swapping = $derived(
@@ -157,7 +160,8 @@
   const toolBase =
     'btn btn-sm leading-[1.45] h-auto min-h-[34px] px-[10px] py-[6px] text-sm font-normal';
   const toolButton = `${toolBase} border-primary/30 bg-base-100 text-secondary`;
-  const chosen = $derived(scene.layers.find((l) => l.id === selected));
+  const layers = $derived(activeLayers(scene));
+  const chosen = $derived(layers.find((l) => l.id === selected));
   const borders = $derived(dividers(scene));
   const frame = (l: Layer) =>
     `left:${(l.x / sceneWidth) * 100}%;top:${(l.y / sceneHeight) * 100}%;width:${(l.width / sceneWidth) * 100}%;height:${(l.height / sceneHeight) * 100}%;transform:rotate(${l.rotation}deg)`;
@@ -435,7 +439,7 @@
       draft = resizeDivider(g.base, g.id, p[d.axis]);
       return;
     }
-    const l = g.base.layers.find((l) => l.id === g.id)!;
+    const l = activeLayers(g.base).find((l) => l.id === g.id)!;
     const dx = p.x - g.start.x;
     const dy = p.y - g.start.y;
     if (g.kind === 'swap') {
@@ -493,12 +497,12 @@
         1,
       );
     }
-    draft = {
-      ...g.base,
-      layers: g.base.layers.map((layer) =>
+    draft = withLayers(
+      g.base,
+      activeLayers(g.base).map((layer) =>
         layer.id === l.id ? changed : layer,
       ),
-    };
+    );
   }
   function finish(event: PointerEvent) {
     const g = gesture;
@@ -520,14 +524,13 @@
     dragClient = null;
   }
   function remove() {
-    if (!enabled || !chosen || scene.style !== 'scrapbook') return;
-    const next = {
-      ...workspace,
-      layers: workspace.layers.filter((l) => l.id !== selected),
-    };
+    if (!enabled || !chosen) return;
+    const next = removeLayer(workspace, selected);
     selected = '';
     cropMode = false;
     oncommit(next);
+    // The focused photo or button is gone; keep the keyboard on the canvas.
+    viewport?.focus({ preventScroll: true });
   }
   function reorder(direction: 'front' | 'back' | 'forward' | 'backward') {
     if (enabled && chosen)
@@ -573,10 +576,11 @@
       scene.style === 'bento'
     ) {
       event.preventDefault();
-      const n = workspace.layers.length;
-      const i = workspace.layers.findIndex((l) => l.id === selected);
+      const cells = activeLayers(workspace);
+      const n = cells.length;
+      const i = cells.findIndex((l) => l.id === selected);
       const target =
-        workspace.layers[(i + (event.key === 'ArrowRight' ? 1 : n - 1)) % n].id;
+        cells[(i + (event.key === 'ArrowRight' ? 1 : n - 1)) % n].id;
       // Swaps move photos between fixed slots, so follow the photo into its new slot.
       oncommit(swapPhotos(workspace, selected, target));
       selected = target;
@@ -611,10 +615,12 @@
           sceneHeight - 48,
         ),
       };
-      oncommit({
-        ...workspace,
-        layers: workspace.layers.map((l) => (l.id === selected ? next : l)),
-      });
+      oncommit(
+        withLayers(
+          workspace,
+          activeLayers(workspace).map((l) => (l.id === selected ? next : l)),
+        ),
+      );
     }
   }
 </script>
@@ -661,7 +667,7 @@
   aria-label="Selected photo actions"
 >
   {#if chosen}
-    <strong class="mr-[5px]">Photo {scene.layers.indexOf(chosen) + 1}</strong>
+    <strong class="mr-[5px]">Photo {layers.indexOf(chosen) + 1}</strong>
     <button
       class={[
         'max-[900px]:min-h-10',
@@ -693,15 +699,15 @@
         disabled={!enabled}
         onclick={() => reorder('back')}>Send to back</button
       >
-      <button
-        class={[
-          toolBase,
-          'border-error/30 bg-base-100 text-error max-[900px]:min-h-10',
-        ]}
-        disabled={!enabled}
-        onclick={remove}>Delete photo</button
-      >
     {/if}
+    <button
+      class={[
+        toolBase,
+        'border-error/30 bg-base-100 text-error max-[900px]:min-h-10',
+      ]}
+      disabled={!enabled}
+      onclick={remove}>Delete photo</button
+    >
   {:else}<span>Select a photo on the canvas to edit it.</span>{/if}
 </div>
 {#if cropMode && chosen}<p class="mb-[10px] text-sm text-secondary">
@@ -756,7 +762,7 @@
           class="border-r border-dashed border-base-100/60"
         ></span>{/each}
     </div>
-    {#each scene.layers as l, i (l.id)}
+    {#each layers as l, i (l.id)}
       <button
         class={[
           'photo-hit absolute touch-none rounded-[2px] p-0 focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-secondary',
@@ -795,11 +801,12 @@
       {#each borders as d (d.path)}
         <button
           class={[
-            'divider-handle absolute z-25 touch-none p-0 before:absolute before:inset-0 before:bg-primary/27 before:opacity-0 hover:before:opacity-100 focus-visible:before:opacity-100',
+            'divider-handle absolute touch-none p-0 before:absolute before:inset-0 before:bg-primary/27 before:opacity-0 hover:before:opacity-100 focus-visible:before:opacity-100',
             d.axis === 'x'
               ? '-translate-x-1/2 cursor-col-resize'
               : '-translate-y-1/2 cursor-row-resize',
           ]}
+          style:z-index={layers.length + 1}
           style:left={`${((d.axis === 'x' ? d.position : d.x) / sceneWidth) * 100}%`}
           style:top={`${((d.axis === 'y' ? d.position : d.y) / sceneHeight) * 100}%`}
           style:width={d.axis === 'x'
@@ -846,12 +853,13 @@
     {/if}
     {#if chosen && enabled}
       <div
-        class="pointer-events-none absolute z-40 border-2 border-secondary"
+        class="pointer-events-none absolute border-2 border-secondary"
         style={frame(chosen)}
+        style:z-index={layers.length + 2}
       >
         <span
           class="absolute top-[2px] left-[2px] rounded-[3px] bg-secondary px-[6px] py-[3px] text-[12px] leading-[1.2] text-secondary-content"
-          >{scene.layers.indexOf(chosen) + 1}</span
+          >{layers.indexOf(chosen) + 1}</span
         >
         {#if scene.style === 'scrapbook' && !cropMode}
           {#each ['nw', 'ne', 'sw', 'se'] as corner (corner)}<button
