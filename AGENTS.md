@@ -38,13 +38,15 @@ Ponytail rules above: https://github.com/DietrichGebert/ponytail (MIT).
 - Read MVP_Spec.md and Hackathon_Rules.md. Session scope decisions take precedence over the draft.
 - pnpm workspace; SvelteKit web in apps/web. Future Astro/Expo apps are deferred.
 - Auth uses Better Auth + Convex and the Convex Resend component. R2 uses @convex-dev/r2; enforce ownership on every media operation. WorkOS is not used.
-- Current slice: three portrait slides, varied Bento templates with drag-to-swap and shared dividers; freeform Scrapbook move/resize/rotate/delete/stacking; crop, history, local autosave and static export. Keep body and control text readable (at least 14px for essential controls).
+- Current slice: polished free editor. 4:5/3:4/1:1/9:16 at 1080px wide, 1–20 slides, 0–100 photos; Bento (tree delete/split, gap/margin/roundness) and Scrapbook with separately stored layouts; text and emoji layers; zoom/pan canvas; crop, history, local autosave and per-slide static export. Session decisions live in MVP_Spec.md. Keep body and control text readable (at least 14px for essential controls).
 - Use pnpm dev, pnpm check, pnpm test, pnpm test:e2e, pnpm build. Vite+ handles supported files; Prettier handles .svelte only because the pinned formatter skips them. Keep Vite+ and pnpm versions pinned.
 - Hooks use Vite+ plus commitlint. Use Conventional Commits; preserve partially staged work. Do not bypass hooks.
-- Originals are immutable. Use one composition model for preview/export. Never persist object URLs.
+- Stored masters (≤4096px, metadata stripped) are immutable; uploaded files are not kept. The editor uses 1440px previews; export decodes masters one slide at a time. Use one composition model for preview/export. Never persist object URLs.
+- Early alpha: no storage migrations or backward compatibility; change the IndexedDB name when the format changes.
 - IndexedDB is not permanent backup. Handle failures visibly. Only one tab may edit the workspace.
 - Test crop geometry, rendering boundaries, persistence, tab takeover, payment idempotency and refunds.
 - PayPal Sandbox only. Secrets remain server-side and outside Git. No simulated payment or AI success.
 - Server MP4 rendering requires consent to upload all composition assets; static creation remains local.
 - Cloud credentials, model pricing and auth must be configured before enabling paid generation.
+- Styling: Tailwind v4 + daisyUI 5 with the `livingcarousel` theme (light only for now); theme tokens only, no hard-coded colors in markup. The app theme never changes exported pixels. Self-host fonts. Prefer native elements (dialog, popover, inputs) over component libraries.
 - Prefer native APIs and plain TypeScript. Extract shared packages only when a second consumer needs them.
