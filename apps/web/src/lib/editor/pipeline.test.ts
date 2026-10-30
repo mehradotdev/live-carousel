@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import { ASPECTS, WIDTH, slideLayers, type Asset, type Layer, type Workspace } from './model';
-import { draw, paint, sourceRect, syncPreviews } from './render';
+import { draw, paint, previewCache, previewEdges, sourceRect, syncPreviews } from './render';
 import { fit, MASTER, PREVIEW, transparent, validProject } from './storage';
 const layer = (x: number, extra: Partial<Layer> = {}): Layer => ({
   id: `l${x}`,
@@ -56,7 +56,7 @@ describe('image pipeline', () => {
     expect(preview.width / 1440).toBeCloseTo(master.width / 4096, 10);
     expect(preview.height / 960).toBeCloseTo(master.height / 2731, 10);
   });
-  it('renders slide i as exactly the region [i*WIDTH, 0, WIDTH, height] for every size', () => {
+  it('renders slide i as exactly the region [i*WIDTH, 0, WIDTH, height] for every size', async () => {
     for (const [aspect, slides] of [
       ['4:5', 3],
       ['9:16', 20],
@@ -72,15 +72,50 @@ describe('image pipeline', () => {
       for (let i = 0; i < slides; i++) {
         const calls: [string, unknown[]][] = [];
         const canvas = recorder(calls);
-        paint({ workspace, assets: [] }, new Map(), canvas, 1, i);
+        await draw({ workspace, assets: [] }, canvas, 1, i);
         expect([canvas.width, canvas.height]).toEqual([WIDTH, ASPECTS[aspect]]);
         expect(calls.find(([k]) => k === 'translate')?.[1]).toEqual([-i * WIDTH, 0]);
       }
       const calls: [string, unknown[]][] = [];
       const wide = recorder(calls);
-      paint({ workspace, assets: [] }, new Map(), wide, 0.5);
+      await draw({ workspace, assets: [] }, wide, 0.5);
       expect([wide.width, wide.height]).toEqual([WIDTH * slides * 0.5, ASPECTS[aspect] * 0.5]);
     }
+  });
+  it('the editor view paints the world through its transform and skips off-screen layers', () => {
+    const calls: [string, unknown[]][] = [];
+    const canvas = Object.assign(recorder(calls), { width: 800, height: 600 });
+    const layers = [layer(0), layer(3 * WIDTH, { id: 'far' })];
+    const workspace = { aspect: '4:5', slides: 4, style: 'bento', background: '#fff', layers };
+    const image = { width: 1440, height: 960 } as ImageBitmap;
+    paint(
+      { workspace: workspace as unknown as Workspace, assets: [asset] },
+      new Map([['a', image]]),
+      canvas,
+      { x: 10, y: 20, scale: 0.5 },
+    );
+    expect(calls.filter(([k]) => k === 'setTransform').at(-1)![1]).toEqual([
+      0.5, 0, 0, 0.5, 10, 20,
+    ]);
+    expect(calls.filter(([k]) => k === 'drawImage')).toHaveLength(1);
+    // Layers are clipped to the strip, as export would crop them.
+    const keys = calls.map(([k]) => k);
+    expect(calls.find(([k]) => k === 'rect')![1]).toEqual([0, 0, 4 * WIDTH, 1350]);
+    expect(keys.indexOf('rect')).toBeLessThan(keys.indexOf('drawImage'));
+    expect(keys.lastIndexOf('restore')).toBeGreaterThan(keys.indexOf('drawImage'));
+  });
+  it('sizes previews for on-screen layers at the current zoom, in coarse steps up to the stored preview', () => {
+    const workspace = { layers: [layer(0), layer(12 * WIDTH, { id: 'far', assetId: 'b' })] };
+    const project = {
+      workspace: workspace as unknown as Workspace,
+      assets: [asset, { ...asset, id: 'b' }],
+    };
+    const viewport = { width: 1000, height: 800 };
+    expect(previewEdges(project, { x: 0, y: 0, scale: 0.1 }, viewport)).toEqual(
+      new Map([['a', 360]]),
+    );
+    expect(previewEdges(project, { x: 0, y: 0, scale: 0.8 }, viewport).get('a')).toBe(1440);
+    expect(previewEdges(project, { x: 0, y: 0, scale: 0.4 }, viewport).get('a')).toBe(720);
   });
   it('decodes only the layers that can reach a slide, including seam-crossing ones', () => {
     const seam = layer(WIDTH - 200, { rotation: 27 });
@@ -123,18 +158,60 @@ describe('image pipeline', () => {
     const closed: string[] = [];
     vi.stubGlobal('createImageBitmap', async (b: { id: string }, o: ImageBitmapOptions) => {
       decoded.push(`${b.id} ${o.resizeWidth}x${o.resizeHeight}`);
-      return { close: () => closed.push(b.id) };
+      return { close: () => closed.push(`${b.id} ${o.resizeWidth}`) };
     });
     const make = (id: string) => ({ ...asset, id, previewBlob: { id } }) as unknown as Asset;
-    const cache = new Map<string, Promise<ImageBitmap>>();
-    await syncPreviews(cache, [make('a'), make('b')], 720);
-    const images = await syncPreviews(cache, [make('a'), make('b'), make('c')], 720);
+    const cache = previewCache();
+    await syncPreviews(cache, [make('a'), make('b')], () => 720);
+    const images = await syncPreviews(cache, [make('a'), make('b'), make('c')], () => 720);
     expect(decoded).toEqual(['a 720x480', 'b 720x480', 'c 720x480']);
-    expect([...images.keys()]).toEqual(['a', 'b', 'c']);
-    await syncPreviews(cache, [make('c')], 720);
+    expect([...images!.keys()]).toEqual(['a', 'b', 'c']);
+    await syncPreviews(cache, [make('c')], () => 720);
     await Promise.resolve();
-    expect(closed).toEqual(['a', 'b']);
+    expect(closed).toEqual(['a 720', 'b 720']);
     expect(decoded).toHaveLength(3);
+    // Zooming in re-decodes sharper and closes the old bitmap only once the new set is ready.
+    await syncPreviews(cache, [make('c')], () => 1440);
+    await Promise.resolve();
+    expect(decoded.at(-1)).toBe('c 1440x960');
+    expect(closed).toEqual(['a 720', 'b 720', 'c 720']);
+  });
+  it('a superseded or failed preview sync keeps the shown bitmap; only the latest success retires it', async () => {
+    const closed: number[] = [];
+    const pending = new Map<number, { resolve: () => void; reject: () => void }>();
+    vi.stubGlobal(
+      'createImageBitmap',
+      (_: Blob, o: ImageBitmapOptions) =>
+        new Promise((resolve, reject) => {
+          const edge = o.resizeWidth!;
+          pending.set(edge, {
+            resolve: () => resolve({ width: edge, close: () => closed.push(edge) }),
+            reject: () => reject(new Error(`decode ${edge} failed`)),
+          });
+        }),
+    );
+    const a = { id: 'a', width: 4000, height: 2000, previewBlob: {} } as unknown as Asset;
+    const cache = previewCache();
+    const first = syncPreviews(cache, [a], () => 360);
+    pending.get(360)!.resolve();
+    expect((await first)!.get('a')!.width).toBe(360);
+    const mid = syncPreviews(cache, [a], () => 720);
+    const last = syncPreviews(cache, [a], () => 1440);
+    // The older decode lands first: it is superseded, closes only its own bitmap and leaves 360 on screen.
+    pending.get(720)!.resolve();
+    expect(await mid).toBeNull();
+    expect(closed).toEqual([720]);
+    expect(cache.shown.get('a')!.width).toBe(360);
+    // The latest one fails: the error surfaces and 360 is still drawn.
+    pending.get(1440)!.reject();
+    await expect(last).rejects.toThrow('decode 1440 failed');
+    expect(closed).toEqual([720]);
+    expect(cache.shown.get('a')!.width).toBe(360);
+    // A retry re-decodes, and its success finally retires 360.
+    const retry = syncPreviews(cache, [a], () => 1440);
+    pending.get(1440)!.resolve();
+    expect((await retry)!.get('a')!.width).toBe(1440);
+    expect(closed).toEqual([720, 360]);
   });
   it('rejects saved projects that would break the editor', () => {
     const good = () => ({

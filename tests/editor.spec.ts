@@ -699,7 +699,7 @@ test('ratio and slide count drive layout and export, and each change is one undo
   await expect(tall).toHaveAttribute('aria-pressed', 'true');
   await page.getByRole('button', { name: 'Add a slide' }).click();
   await page.getByRole('button', { name: 'Add a slide' }).click();
-  await expect(page.locator('output')).toHaveText('5\u00a0slides');
+  await expect(page.getByText('5\u00a0slides', { exact: true })).toBeVisible();
   await expect(page.getByLabel('Your continuous 5-slide collage')).toBeVisible();
   let w = (await saved(page)).workspace;
   expect([w.aspect, w.slides]).toEqual(['9:16', 5]);
@@ -764,4 +764,104 @@ test('a format change during a drag cancels the gesture instead of reverting the
   const after = (await saved(page)).workspace;
   expect(after.aspect).toBe('1:1');
   expect(after.layers[0].width).toBeCloseTo((before.layers[0].width * 1080) / 1350);
+});
+
+test('canvas zooms at the cursor, pans, centres a slide from the strip and keeps drags exact', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await upload(page, 3);
+  await page.getByRole('button', { name: /Scrapbook/ }).click();
+  const zoom = page.getByLabel('Canvas zoom');
+  const percent = async () => parseInt((await zoom.textContent())!) / 100;
+  const fitted = await zoom.textContent();
+  const canvas = page.getByRole('group', { name: 'Interactive collage canvas' });
+  let box = (await canvas.boundingBox())!;
+  await page.mouse.move(box.x + 20, box.y + box.height / 2);
+  await page.keyboard.down('Control');
+  await page.mouse.wheel(0, -200);
+  await page.keyboard.up('Control');
+  await expect(zoom).not.toHaveText(fitted!);
+  expect(await percent()).toBeGreaterThan(parseInt(fitted!) / 100);
+
+  await page.getByRole('button', { name: 'Show slide 3' }).click();
+  await expect(page.getByRole('button', { name: 'Show slide 3' })).toHaveAttribute(
+    'aria-current',
+    'true',
+  );
+  // The strip sits below the canvas, so clicking it may scroll the page.
+  box = (await canvas.boundingBox())!;
+  const stage = (await page.locator('.photo-hit').first().locator('..').boundingBox())!;
+  const scale = stage.width / (3 * 1080);
+  // Slide 3's centre sits at the viewport's centre.
+  expect(stage.x + 2.5 * 1080 * scale).toBeCloseTo(box.x + box.width / 2, 0);
+  // A horizontal wheel pans the zoomed view.
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.wheel(-80, 0);
+  await expect
+    .poll(async () => (await page.locator('.photo-hit').first().locator('..').boundingBox())!.x)
+    .toBeCloseTo(stage.x + 80, 0);
+
+  const before = (await saved(page)).workspace;
+  const layer = before.layers.find((l) => l.x >= 2 * 1080)!;
+  const photo = page.locator(`[data-layer-id="${layer.id}"]`);
+  const b = (await photo.boundingBox())!;
+  await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(b.x + b.width / 2 - 60, b.y + b.height / 2 + 30, { steps: 8 });
+  await page.mouse.up();
+  await expect
+    .poll(async () => (await saved(page)).workspace.layers.find((l) => l.id === layer.id)!.x)
+    .toBeCloseTo(layer.x - 60 / scale, -1);
+  const moved = (await saved(page)).workspace.layers.find((l) => l.id === layer.id)!;
+  expect(moved.y - layer.y).toBeCloseTo(30 / scale, -1);
+
+  await page.keyboard.press('0');
+  await expect(zoom).toHaveText(fitted!);
+  await expect(page.getByRole('button', { name: 'Show slide 2' })).toHaveAttribute(
+    'aria-current',
+    'true',
+  );
+});
+
+test('tabbing to a photo or divider outside the zoomed view pans it into view', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await upload(page, 6);
+  await expect(page.getByLabel('Your continuous 3-slide collage')).toBeVisible();
+  await page.getByRole('button', { name: 'Show slide 1' }).click();
+  const canvas = page.getByRole('group', { name: 'Interactive collage canvas' });
+  let box = (await canvas.boundingBox())!;
+  const inside = (b: { x: number; y: number; width: number; height: number }) =>
+    b.x >= box.x - 1 &&
+    b.y >= box.y - 1 &&
+    b.x + b.width <= box.x + box.width + 1 &&
+    b.y + b.height <= box.y + box.height + 1;
+  const hidden: string[] = [];
+  for (const photo of await page.locator('.photo-hit').all())
+    if (!inside((await photo.boundingBox())!))
+      hidden.push((await photo.getAttribute('data-layer-id'))!);
+  expect(hidden.length).toBeGreaterThan(0);
+  // Walk backwards from the slide strip through every divider and photo.
+  const seen: string[] = [];
+  for (let i = 0; i < 40; i++) {
+    await page.keyboard.press('Shift+Tab');
+    const focused = page.locator('.photo-hit:focus, .divider-handle:focus');
+    if (!(await focused.count())) {
+      if (seen.length) break;
+      continue;
+    }
+    const id = await focused.getAttribute('data-layer-id');
+    if (id) seen.push(id);
+    else seen.push('divider');
+    // Focus may scroll the page, so measure both again.
+    box = (await canvas.boundingBox())!;
+    expect(inside((await focused.boundingBox())!)).toBe(true);
+  }
+  expect(seen).toEqual(expect.arrayContaining(hidden));
 });

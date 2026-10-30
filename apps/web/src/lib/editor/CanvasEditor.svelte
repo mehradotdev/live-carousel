@@ -17,7 +17,24 @@
     type Layer,
     type Point,
   } from './model';
-  import { paint, previewEdge, sourceRect, syncPreviews } from './render';
+  import {
+    MIN_EDGE,
+    paint,
+    previewCache,
+    previewEdges,
+    sourceRect,
+    syncPreviews,
+  } from './render';
+  import {
+    centredSlide,
+    clampView,
+    fitRect,
+    reveal,
+    scaleBounds,
+    zoomAt,
+    type Rect,
+    type View,
+  } from './view';
   let {
     workspace,
     assets,
@@ -45,13 +62,27 @@
     id: string;
     corner: string;
   };
+  let viewport = $state<HTMLDivElement>();
   let stage = $state<HTMLDivElement>();
   let canvas = $state<HTMLCanvasElement>();
   let draft = $state.raw<Workspace | null>(null);
   let gesture = $state.raw<Gesture | null>(null);
   let images = $state.raw(new Map<string, ImageBitmap>());
-  let zoom = $state(1);
-  let stageWidth = $state(0);
+  let size = $state.raw({ width: 0, height: 0 });
+  let view = $state.raw<View>({ x: 0, y: 0, scale: 0 });
+  // Previews are re-sized for the view once zooming pauses, not on every frame.
+  let settled = $state.raw<View>({ x: 0, y: 0, scale: 0 });
+  let pan = $state.raw<{
+    pointerId: number;
+    x: number;
+    y: number;
+    view: View;
+    moved: boolean;
+  } | null>(null);
+  let pinch: { distance: number; centre: Point; view: View } | null = null;
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity -- pointer bookkeeping never drives rendering
+  const touches = new Map<number, Point>();
+  let spaceHeld = $state(false);
   let cropMode = $state(false);
   let dropTarget = $state('');
   let dragPoint = $state<Point | null>(null);
@@ -118,29 +149,52 @@
   const scene = $derived(draft ?? workspace);
   const sceneWidth = $derived(WIDTH * scene.slides);
   const sceneHeight = $derived(slideSize(scene.aspect).height);
-  const pixelScale = $derived(
-    Math.min(
-      1,
-      (stageWidth * (globalThis.devicePixelRatio || 1)) / sceneWidth,
-    ) || 0.5,
+  const world = $derived({ width: sceneWidth, height: sceneHeight });
+  const bounds = $derived(scaleBounds(world, slideSize(scene.aspect), size));
+  const current = $derived(
+    view.scale ? centredSlide(view, size, scene.slides) : 0,
   );
   const toolBase =
     'btn btn-sm leading-[1.45] h-auto min-h-[34px] px-[10px] py-[6px] text-sm font-normal';
   const toolButton = `${toolBase} border-primary/30 bg-base-100 text-secondary`;
   const chosen = $derived(scene.layers.find((l) => l.id === selected));
   const borders = $derived(dividers(scene));
-  // Tall formats are capped at 70vh at 100% so a single 9:16 slide never outgrows the screen.
-  const stripWidth = $derived(
-    `min(${zoom * 100}%, ${(zoom * 70 * sceneWidth) / sceneHeight}vh)`,
-  );
   const frame = (l: Layer) =>
     `left:${(l.x / sceneWidth) * 100}%;top:${(l.y / sceneHeight) * 100}%;width:${(l.width / sceneWidth) * 100}%;height:${(l.height / sceneHeight) * 100}%;transform:rotate(${l.rotation}deg)`;
-  const previews = new Map<string, Promise<ImageBitmap>>();
+  const dpr = () => globalThis.devicePixelRatio || 1;
+  const device = (v: View) => ({
+    x: v.x * dpr(),
+    y: v.y * dpr(),
+    scale: v.scale * dpr(),
+  });
+  const previews = previewCache();
   $effect(() => {
+    const v = view;
+    const timer = setTimeout(() => (settled = v), 150);
+    return () => clearTimeout(timer);
+  });
+  const edges = $derived(
+    previewEdges({ workspace, assets }, device(settled), {
+      width: size.width * dpr(),
+      height: size.height * dpr(),
+    }),
+  );
+  $effect(() => {
+    if (!settled.scale) return;
     let alive = true;
-    void syncPreviews(previews, assets, previewEdge())
+    const wanted = edges;
+    // Photos that leave the view keep their decoded tier so panning back is instant and never re-decodes.
+    // shortcut: memory grows to every photo seen at its sharpest tier (≤100 × 1440px), evict off-screen ones if phones run out.
+    const kept = assets.filter(
+      (a) => wanted.has(a.id) || previews.entries.has(a.id),
+    );
+    void syncPreviews(
+      previews,
+      kept,
+      (a) => wanted.get(a.id) ?? previews.entries.get(a.id)?.edge ?? MIN_EDGE,
+    )
       .then((result) => {
-        if (alive) images = result;
+        if (alive && result) images = result;
       })
       .catch(onerror);
     return () => {
@@ -148,22 +202,62 @@
     };
   });
   onMount(() => () => {
-    void syncPreviews(previews, [], 0);
+    void syncPreviews(previews, [], () => 0);
   });
+  // One paint per frame, of the viewport only.
   $effect(() => {
-    if (!canvas) return;
+    if (!canvas || !view.scale) return;
     const target = canvas;
-    const current = scene;
+    const workspace = scene;
     const sources = images;
-    const scale = pixelScale;
+    const at = device(view);
+    const width = Math.round(size.width * dpr());
+    const height = Math.round(size.height * dpr());
     const frame = requestAnimationFrame(() => {
       try {
-        paint({ workspace: current, assets }, sources, target, scale);
+        if (target.width !== width || target.height !== height) {
+          target.width = width;
+          target.height = height;
+        }
+        paint({ workspace, assets }, sources, target, at);
       } catch (e) {
         onerror(e);
       }
     });
     return () => cancelAnimationFrame(frame);
+  });
+  const slideRect = (i: number) => ({
+    x: i * WIDTH,
+    y: 0,
+    width: WIDTH,
+    height: sceneHeight,
+  });
+  const settle = (v: View) => (view = clampView(v, world, size, bounds));
+  // Gestures hold a start point in world or screen space, so navigation waits until they end.
+  const busy = () => !!(gesture || pan || pinch);
+  const fit = () => busy() || settle(fitRect({ x: 0, y: 0, ...world }, size));
+  const showSlide = (i: number) =>
+    busy() || settle(fitRect(slideRect(i), size));
+  function zoomTo(
+    scale: number,
+    at = { x: size.width / 2, y: size.height / 2 },
+  ) {
+    if (!busy()) settle(zoomAt(view, at, clamp(scale, bounds.min, bounds.max)));
+  }
+  // overflow-clip never scrolls, so keyboard focus pans the view to what it lands on.
+  function show(event: FocusEvent, rect: Rect) {
+    if (!busy() && (event.currentTarget as Element).matches(':focus-visible'))
+      settle(reveal(view, rect, size));
+  }
+  // First measure picks the default view (one readable slide on phones, the whole strip otherwise); later size or format changes only re-clamp.
+  $effect(() => {
+    void world;
+    if (!size.width) return;
+    untrack(() => {
+      if (view.scale) settle(view);
+      else if (size.width < 640) showSlide(0);
+      else fit();
+    });
   });
   $effect(() => {
     if (!enabled) cancel();
@@ -174,18 +268,129 @@
     untrack(cancel);
   });
   onMount(() => {
+    const el = viewport!;
     const observer = new ResizeObserver(() => {
-      if (stage) stageWidth = stage.clientWidth;
+      size = { width: el.clientWidth, height: el.clientHeight };
     });
-    if (stage) observer.observe(stage);
-    return () => observer.disconnect();
-  });
-  function point(event: PointerEvent): Point {
-    const rect = stage!.getBoundingClientRect();
-    return {
-      x: ((event.clientX - rect.left) / rect.width) * sceneWidth,
-      y: ((event.clientY - rect.top) / rect.height) * sceneHeight,
+    observer.observe(el);
+    // Non-passive so zoom and pan can claim the wheel; see wheel() for when it falls through to the page.
+    el.addEventListener('wheel', wheel, { passive: false });
+    return () => {
+      observer.disconnect();
+      el.removeEventListener('wheel', wheel);
     };
+  });
+  function local(event: { clientX: number; clientY: number }): Point {
+    const rect = viewport!.getBoundingClientRect();
+    return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+  }
+  // The single screen → world conversion used by every gesture.
+  function point(event: PointerEvent): Point {
+    const p = local(event);
+    return { x: (p.x - view.x) / view.scale, y: (p.y - view.y) / view.scale };
+  }
+  // Ctrl/cmd + wheel (and trackpad pinch) zooms at the cursor. Plain wheel pans only while its dominant axis can still move,
+  // so page scroll is never trapped at the strip's edge or when nothing overflows.
+  function wheel(event: WheelEvent) {
+    const unit =
+      event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? size.height : 1;
+    let dx = event.deltaX * unit;
+    let dy = event.deltaY * unit;
+    if (busy()) {
+      event.preventDefault();
+      return;
+    }
+    if (event.ctrlKey || event.metaKey) {
+      event.preventDefault();
+      zoomTo(view.scale * Math.exp(-clamp(dy, -25, 25) / 100), local(event));
+      return;
+    }
+    if (event.shiftKey && !dx) [dx, dy] = [dy, 0];
+    const next = clampView(
+      { ...view, x: view.x - dx, y: view.y - dy },
+      world,
+      size,
+      bounds,
+    );
+    if (Math.abs(dy) > Math.abs(dx) ? next.y === view.y : next.x === view.x)
+      return;
+    event.preventDefault();
+    view = next;
+  }
+  // Capture phase: sees every touch, so a second finger turns any gesture into a pinch.
+  function track(event: PointerEvent) {
+    if (event.pointerType !== 'touch') return;
+    touches.set(event.pointerId, local(event));
+    if (touches.size !== 2) return;
+    cancel();
+    pan = null;
+    // Both fingers report to the viewport even if they leave it, so neither lingers in `touches`.
+    for (const id of touches.keys()) viewport!.setPointerCapture(id);
+    const [a, b] = [...touches.values()];
+    pinch = {
+      distance: Math.hypot(a.x - b.x, a.y - b.y) || 1,
+      centre: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 },
+      view,
+    };
+  }
+  // Bubble phase: only reached when no photo, divider or handle took the pointer (or space is held).
+  function grab(event: PointerEvent) {
+    if (pinch || gesture || pan || event.button > 1) return;
+    event.preventDefault();
+    viewport!.focus({ preventScroll: true });
+    viewport!.setPointerCapture(event.pointerId);
+    pan = {
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+      view,
+      moved: false,
+    };
+  }
+  function drag(event: PointerEvent) {
+    if (touches.has(event.pointerId))
+      touches.set(event.pointerId, local(event));
+    if (pinch && touches.has(event.pointerId)) {
+      const [a, b] = [...touches.values()];
+      const p = pinch;
+      const scale = clamp(
+        (p.view.scale * Math.hypot(a.x - b.x, a.y - b.y)) / p.distance,
+        bounds.min,
+        bounds.max,
+      );
+      const f = scale / p.view.scale;
+      const x = (a.x + b.x) / 2;
+      const y = (a.y + b.y) / 2;
+      settle({
+        scale,
+        x: x - (p.centre.x - p.view.x) * f,
+        y: y - (p.centre.y - p.view.y) * f,
+      });
+      return;
+    }
+    if (pan?.pointerId === event.pointerId) {
+      const dx = event.clientX - pan.x;
+      const dy = event.clientY - pan.y;
+      if (Math.hypot(dx, dy) > 3) pan = { ...pan, moved: true };
+      settle({ ...pan.view, x: pan.view.x + dx, y: pan.view.y + dy });
+      return;
+    }
+    move(event);
+  }
+  function release(event: PointerEvent) {
+    touches.delete(event.pointerId);
+    if (touches.size < 2) pinch = null;
+    if (pan?.pointerId === event.pointerId) {
+      // A tap on empty space clears the selection.
+      if (!pan.moved && event.type === 'pointerup') {
+        selected = '';
+        cropMode = false;
+      }
+      pan = null;
+      return;
+    }
+    if (event.type === 'pointerup') finish(event);
+    else cancel();
   }
   function start(
     event: PointerEvent,
@@ -193,11 +398,11 @@
     id: string,
     corner = '',
   ) {
-    if (!enabled || event.button !== 0 || gesture) return;
+    if (!enabled || event.button !== 0 || gesture || pinch || spaceHeld) return;
     event.preventDefault();
     event.stopPropagation();
     if (kind !== 'divider') selected = id;
-    stage!.focus({ preventScroll: true });
+    viewport!.focus({ preventScroll: true });
     stage!.setPointerCapture(event.pointerId);
     gesture = {
       kind,
@@ -329,6 +534,23 @@
       oncommit(reorderLayer(workspace, selected, direction));
   }
   function keys(event: KeyboardEvent) {
+    if (event.key === ' ' && event.target === viewport) {
+      event.preventDefault();
+      spaceHeld = true;
+      return;
+    }
+    if (
+      !event.metaKey &&
+      !event.ctrlKey &&
+      !event.altKey &&
+      !(event.target instanceof HTMLInputElement) &&
+      ['+', '=', '-', '0'].includes(event.key)
+    ) {
+      event.preventDefault();
+      if (event.key === '0') fit();
+      else zoomTo(view.scale * (event.key === '-' ? 0.8 : 1.25));
+      return;
+    }
     if (event.key === 'Escape') {
       event.preventDefault();
       cancel();
@@ -399,8 +621,12 @@
 
 <svelte:window
   onkeydown={(e) => {
-    if (stage?.contains(document.activeElement)) keys(e);
+    if (viewport?.contains(document.activeElement)) keys(e);
   }}
+  onkeyup={(e) => {
+    if (e.key === ' ') spaceHeld = false;
+  }}
+  onblur={() => (spaceHeld = false)}
 />
 
 <div
@@ -410,23 +636,23 @@
     {scene.style === 'scrapbook'
       ? 'Drag photos to move · corners to resize · top handle to rotate'
       : 'Drag a photo onto another or use arrow keys to swap · drag a divider to resize cells'}
+    · Pinch or ctrl + scroll to zoom, drag empty space to pan.
   </p>
   <div class="flex shrink-0 items-center gap-[5px]">
     <button
       class={[toolButton, 'max-[900px]:min-w-9']}
       aria-label="Zoom canvas out"
-      disabled={zoom <= 1}
-      onclick={() => (zoom = Math.max(1, zoom - 0.25))}>−</button
-    ><span class="min-w-[42px] text-center text-sm"
-      >{Math.round(zoom * 100)}%</span
+      disabled={view.scale <= bounds.min * 1.001}
+      onclick={() => zoomTo(view.scale * 0.8)}>−</button
+    ><output class="min-w-[42px] text-center text-sm" aria-label="Canvas zoom"
+      >{Math.round(view.scale * 100)}%</output
     ><button
       class={[toolButton, 'max-[900px]:min-w-9']}
       aria-label="Zoom canvas in"
-      disabled={zoom >= 2.5}
-      onclick={() => (zoom = Math.min(2.5, zoom + 0.25))}>+</button
-    ><button
-      class={[toolButton, 'max-[900px]:min-w-9']}
-      onclick={() => (zoom = 1)}>Fit</button
+      disabled={view.scale >= bounds.max * 0.999}
+      onclick={() => zoomTo(view.scale * 1.25)}>+</button
+    ><button class={[toolButton, 'max-[900px]:min-w-9']} onclick={fit}
+      >Fit</button
     >
   </div>
 </div>
@@ -483,29 +709,44 @@
     closer.
   </p>{/if}
 <div
-  class="-mx-[14px] overflow-auto px-[14px] pt-10 pb-5 [scrollbar-width:thin]"
+  class={[
+    'relative max-h-[70svh] min-h-[280px] w-full touch-none overflow-clip rounded-[6px] bg-base-content/12 outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary',
+    pan?.moved ? 'cursor-grabbing' : spaceHeld && 'cursor-grab',
+  ]}
+  bind:this={viewport}
+  style:aspect-ratio={`${WIDTH} / ${sceneHeight}`}
+  role="group"
+  tabindex="-1"
+  aria-label="Interactive collage canvas"
+  aria-describedby="canvas-instructions"
+  onpointerdowncapture={track}
+  onpointerdown={grab}
+  onpointermove={drag}
+  onpointerup={release}
+  onpointercancel={release}
+  onlostpointercapture={(e) => {
+    if (e.target !== viewport) return;
+    touches.delete(e.pointerId);
+    if (touches.size < 2) pinch = null;
+    if (pan?.pointerId === e.pointerId) pan = null;
+  }}
 >
+  <canvas
+    class="absolute inset-0 block size-full"
+    bind:this={canvas}
+    aria-label={`Your continuous ${scene.slides}-slide collage`}
+  ></canvas>
   <div
-    class="relative mx-auto min-w-0 shadow-[0_3px_20px_currentColor] shadow-base-content/8 outline-none focus-visible:outline-2 focus-visible:outline-offset-8 focus-visible:outline-primary"
+    class="absolute top-0 left-0 shadow-[0_3px_20px_currentColor] shadow-base-content/8"
     bind:this={stage}
-    style:width={stripWidth}
-    style:aspect-ratio={`${sceneWidth} / ${sceneHeight}`}
-    role="group"
-    tabindex="-1"
-    aria-label="Interactive collage canvas"
-    aria-describedby="canvas-instructions"
-    onpointermove={move}
-    onpointerup={finish}
-    onpointercancel={cancel}
+    style:left={`${view.x}px`}
+    style:top={`${view.y}px`}
+    style:width={`${sceneWidth * view.scale}px`}
+    style:height={`${sceneHeight * view.scale}px`}
     onlostpointercapture={() => {
       if (gesture) cancel();
     }}
   >
-    <canvas
-      class="block size-full"
-      bind:this={canvas}
-      aria-label={`Your continuous ${scene.slides}-slide collage`}
-    ></canvas>
     <div
       class="pointer-events-none absolute inset-0 grid"
       style:grid-template-columns={`repeat(${scene.slides}, minmax(0, 1fr))`}
@@ -515,15 +756,6 @@
           class="border-r border-dashed border-base-100/60"
         ></span>{/each}
     </div>
-    <button
-      class="absolute inset-0 size-full"
-      aria-label="Clear photo selection"
-      onclick={() => {
-        selected = '';
-        cropMode = false;
-      }}
-      tabindex="-1"
-    ></button>
     {#each scene.layers as l, i (l.id)}
       <button
         class={[
@@ -541,6 +773,7 @@
         style:z-index={i + 1}
         aria-label={`Select photo ${i + 1} on canvas`}
         aria-pressed={selected === l.id}
+        onfocus={(e) => show(e, l)}
         onpointerdown={(e) =>
           start(
             e,
@@ -577,6 +810,13 @@
             : `${(d.height / sceneHeight) * 100}%`}
           aria-label={`Resize ${d.axis === 'x' ? 'vertical' : 'horizontal'} divider ${d.path || 'root'}`}
           onpointerdown={(e) => start(e, 'divider', d.path)}
+          onfocus={(e) =>
+            show(
+              e,
+              d.axis === 'x'
+                ? { x: d.position, y: d.y, width: 0, height: d.height }
+                : { x: d.x, y: d.position, width: d.width, height: 0 },
+            )}
           onkeydown={(e) => {
             if (
               ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(
@@ -666,12 +906,20 @@
     {/if}
   </div>
 </div>
-<div
-  class="mx-auto mt-3 grid text-center text-sm tracking-[0.5px] text-neutral"
-  style:width={stripWidth}
-  style:grid-template-columns={`repeat(${scene.slides}, minmax(0, 1fr))`}
+<nav
+  class="mx-auto mt-3 flex w-fit max-w-full gap-[5px] overflow-x-auto pb-1 [scrollbar-width:thin]"
+  aria-label="Slides"
 >
-  {#each { length: scene.slides }, i (i)}<span
-      >{scene.slides > 6 ? i + 1 : `Slide ${i + 1}`}</span
+  {#each { length: scene.slides }, i (i)}<button
+      class={[
+        toolBase,
+        'min-w-10 shrink-0',
+        current === i
+          ? 'border-primary bg-primary text-primary-content'
+          : 'border-primary/30 bg-base-100 text-secondary',
+      ]}
+      aria-label={`Show slide ${i + 1}`}
+      aria-current={current === i ? 'true' : undefined}
+      onclick={() => showSlide(i)}>{i + 1}</button
     >{/each}
-</div>
+</nav>

@@ -9,6 +9,7 @@ import {
   type Workspace,
 } from './model';
 import { fit, PREVIEW } from './storage';
+import { reaches, visibleRect, type Size, type View } from './view';
 // Crop in master pixels, mapped onto whichever bitmap (preview or master) was decoded.
 export function sourceRect(asset: Asset, image: { width: number; height: number }, layer: Layer) {
   const crop = coverCrop(
@@ -83,19 +84,35 @@ function paintLayer(
   );
   ctx.restore();
 }
+// Editor view onto an already-sized canvas, in device px; layers off the canvas are skipped.
 export function paint(
   { workspace, assets }: Project,
   images: Map<string, ImageBitmap>,
   canvas: HTMLCanvasElement,
-  scale = 1,
-  slide?: number,
+  view: View,
 ) {
-  const ctx = begin(workspace, canvas, scale, slide);
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('Canvas is unavailable.');
+  const { width, height } = slideSize(workspace.aspect);
+  const visible = visibleRect(view, canvas);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.setTransform(view.scale, 0, 0, view.scale, view.x, view.y);
+  ctx.fillStyle = workspace.background;
+  ctx.fillRect(0, 0, width * workspace.slides, height);
+  // Export drops pixels outside the strip, so the editor does too.
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, 0, width * workspace.slides, height);
+  ctx.clip();
   for (const layer of workspace.layers) {
     const image = images.get(layer.assetId);
     const asset = assets.find((a) => a.id === layer.assetId);
-    if (image && asset) paintLayer(ctx, workspace, asset, image, layer, scale);
+    // A closed bitmap (replaced by a sharper decode) has zero size.
+    if (image?.width && asset && reaches(layer, visible))
+      paintLayer(ctx, workspace, asset, image, layer, view.scale);
   }
+  ctx.restore();
 }
 // Masters are decoded, painted and closed one layer at a time in z-order, so peak memory is one master.
 export async function draw(
@@ -117,38 +134,93 @@ export async function draw(
     }
   }
 }
-// Editor tiles rarely exceed ~720 CSS px, so this is as sharp as the screen shows while using a quarter of the memory on 1x displays.
-export const previewEdge = () =>
-  Math.min(PREVIEW, Math.ceil(720 * (globalThis.devicePixelRatio || 1)));
-// One display-sized bitmap per asset: only new assets are decoded and removed ones are closed.
-export function syncPreviews(
-  cache: Map<string, Promise<ImageBitmap>>,
-  assets: Asset[],
-  edge: number,
-) {
+// Decoded long edge per on-screen asset so photos stay sharp at `view` (device px), in 360/720/1440 steps so zooming rarely re-decodes.
+export function previewEdges({ workspace, assets }: Project, view: View, viewport: Size) {
+  const visible = visibleRect(view, viewport);
+  const edges = new Map<string, number>();
+  for (const layer of workspace.layers) {
+    const asset = assets.find((a) => a.id === layer.assetId);
+    if (!asset || !reaches(layer, visible)) continue;
+    const crop = coverCrop(
+      asset.width,
+      asset.height,
+      layer.width,
+      layer.height,
+      layer.zoom,
+      layer.panX,
+      layer.panY,
+    );
+    const need = (Math.max(asset.width, asset.height) * layer.width * view.scale) / crop.width;
+    const edge = Math.min(
+      PREVIEW,
+      MIN_EDGE * 2 ** Math.max(0, Math.ceil(Math.log2(need / MIN_EDGE))),
+    );
+    edges.set(asset.id, Math.max(edges.get(asset.id) ?? 0, edge));
+  }
+  return edges;
+}
+export const MIN_EDGE = 360;
+// `entries` is the latest wanted decode per asset; `shown` is what the canvas draws now.
+export type Previews = {
+  generation: number;
+  entries: Map<string, { edge: number; image: Promise<ImageBitmap> }>;
+  shown: Map<string, ImageBitmap>;
+};
+export const previewCache = (): Previews => ({
+  generation: 0,
+  entries: new Map(),
+  shown: new Map(),
+});
+// Only the latest sync swaps its set in and retires shown bitmaps, so a superseded or failed sync never blanks a photo.
+// Resolves to null when superseded. A dropped decode is closed unless it is on screen (the next swap closes that one).
+export function syncPreviews(cache: Previews, assets: Asset[], edgeOf: (asset: Asset) => number) {
+  const generation = ++cache.generation;
+  const drop = (id: string, entry: { image: Promise<ImageBitmap> }) =>
+    void entry.image.then(
+      (b) => cache.shown.get(id) !== b && b.close(),
+      () => {},
+    );
   const ids = new Set(assets.map((a) => a.id));
-  for (const [id, image] of cache)
+  for (const [id, entry] of cache.entries)
     if (!ids.has(id)) {
-      cache.delete(id);
-      void image.then(
-        (b) => b.close(),
-        () => {},
-      );
+      cache.entries.delete(id);
+      drop(id, entry);
     }
-  for (const asset of assets)
-    if (!cache.has(asset.id)) {
-      const size = fit(asset.width, asset.height, edge);
-      const image = createImageBitmap(asset.previewBlob, {
+  for (const asset of assets) {
+    const edge = edgeOf(asset);
+    const old = cache.entries.get(asset.id);
+    if (old?.edge === edge) continue;
+    if (old) drop(asset.id, old);
+    const size = fit(asset.width, asset.height, edge);
+    const entry = {
+      edge,
+      image: createImageBitmap(asset.previewBlob, {
         resizeWidth: size.width,
         resizeHeight: size.height,
         resizeQuality: 'high',
-      });
-      // A failed decode is retried on the next sync instead of being cached.
-      image.catch(() => cache.get(asset.id) === image && cache.delete(asset.id));
-      cache.set(asset.id, image);
-    }
-  return Promise.all(assets.map(async (a) => [a.id, await cache.get(a.id)!] as const)).then(
-    (entries) => new Map(entries),
+      }),
+    };
+    // A failed decode is retried on the next sync instead of being cached.
+    entry.image.catch(
+      () => cache.entries.get(asset.id) === entry && cache.entries.delete(asset.id),
+    );
+    cache.entries.set(asset.id, entry);
+  }
+  const latest = () => generation === cache.generation;
+  return Promise.all(
+    assets.map(async (a) => [a.id, await cache.entries.get(a.id)!.image] as const),
+  ).then(
+    (entries) => {
+      if (!latest()) return null;
+      const next = new Map(entries);
+      for (const [id, b] of cache.shown) if (next.get(id) !== b) b.close();
+      cache.shown = next;
+      return new Map(next);
+    },
+    (error) => {
+      if (latest()) throw error;
+      return null;
+    },
   );
 }
 export function blob(canvas: HTMLCanvasElement, type: string, quality = 0.94): Promise<Blob> {
