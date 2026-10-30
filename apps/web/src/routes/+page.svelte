@@ -17,6 +17,7 @@
     BACKGROUNDS,
     DEFAULT_HIGHLIGHT,
     FONTS,
+    isEmojiOnly,
     MAX_TEXT,
     SPACING_MAX,
     TEMPLATES,
@@ -86,6 +87,8 @@
   const layer = $derived(placed.find((l) => l.id === selected));
   const text = $derived(shown.overlays.find((l) => l.id === selected));
   const textFont = $derived(FONTS.find((f) => f.family === text?.fontFamily));
+  // Font and color do nothing for these; a style set before the text became emoji stays offered so it can be turned off.
+  const emojiText = $derived(!!text && isEmojiOnly(text.text));
   // Up and down move within what the layer actually stacks against.
   const textPeers = $derived(style === 'bento' ? shown.overlays : stack(shown));
   let textBox = $state<HTMLTextAreaElement>();
@@ -1208,28 +1211,30 @@
               oninput={(e) => typeText(e.currentTarget.value)}
               onblur={() => (burst = '')}></textarea></label
           >
-          <label class={fieldLabel}
-            >Font<select
-              class="select h-auto min-h-[42px] w-full border-primary/30 text-base leading-[1.45] text-secondary"
-              aria-label="Font"
-              value={text.fontFamily}
-              onchange={(e) => {
-                const field = e.currentTarget;
-                const family = field.value;
-                editText({ fontFamily: family })
-                  .catch(fail)
-                  .finally(() => {
-                    // A failed or overtaken choice must not stay showing, unless a newer one is pending.
-                    if (field.value === family)
-                      field.value = text?.fontFamily ?? '';
-                  });
-              }}
+          {#if !emojiText}
+            <label class={fieldLabel}
+              >Font<select
+                class="select h-auto min-h-[42px] w-full border-primary/30 text-base leading-[1.45] text-secondary"
+                aria-label="Font"
+                value={text.fontFamily}
+                onchange={(e) => {
+                  const field = e.currentTarget;
+                  const family = field.value;
+                  editText({ fontFamily: family })
+                    .catch(fail)
+                    .finally(() => {
+                      // A failed or overtaken choice must not stay showing, unless a newer one is pending.
+                      if (field.value === family)
+                        field.value = text?.fontFamily ?? '';
+                    });
+                }}
+              >
+                {#each FONTS as font (font.family)}<option value={font.family}
+                    >{font.family} ({font.kind})</option
+                  >{/each}
+              </select></label
             >
-              {#each FONTS as font (font.family)}<option value={font.family}
-                  >{font.family} ({font.kind})</option
-                >{/each}
-            </select></label
-          >
+          {/if}
           <label class={fieldLabel}>
             <span class="flex justify-between"
               >Size<output>{Math.round(text.size)}px</output></span
@@ -1246,60 +1251,64 @@
                 void editText({ size: +e.currentTarget.value }).catch(fail)}
             /></label
           >
-          <div class="grid gap-[7px] text-sm text-neutral">
-            <span id="text-color">Color</span>
-            <div
-              class="flex flex-wrap items-center gap-2"
-              role="group"
-              aria-labelledby="text-color"
-            >
-              {#each TEXT_COLORS as [name, color] (color)}
-                <button
-                  class={[
-                    'size-[42px] rounded-full border border-base-content/25',
-                    text.color === color &&
-                      'outline-2 outline-offset-2 outline-primary',
-                  ]}
-                  style:background-color={color}
-                  aria-label={`${name} text`}
-                  aria-pressed={text.color === color}
-                  title={name}
-                  onclick={() => void editText({ color }).catch(fail)}
-                ></button>
-              {/each}
-              <input
-                class="size-[42px] cursor-pointer rounded-full p-0"
-                type="color"
-                aria-label="Custom text color"
-                value={text.color}
-                oninput={(e) => previewText({ color: e.currentTarget.value })}
-                onchange={(e) =>
-                  void editText({ color: e.currentTarget.value }).catch(fail)}
-              />
+          {#if !emojiText}
+            <div class="grid gap-[7px] text-sm text-neutral">
+              <span id="text-color">Color</span>
+              <div
+                class="flex flex-wrap items-center gap-2"
+                role="group"
+                aria-labelledby="text-color"
+              >
+                {#each TEXT_COLORS as [name, color] (color)}
+                  <button
+                    class={[
+                      'size-[42px] rounded-full border border-base-content/25',
+                      text.color === color &&
+                        'outline-2 outline-offset-2 outline-primary',
+                    ]}
+                    style:background-color={color}
+                    aria-label={`${name} text`}
+                    aria-pressed={text.color === color}
+                    title={name}
+                    onclick={() => void editText({ color }).catch(fail)}
+                  ></button>
+                {/each}
+                <input
+                  class="size-[42px] cursor-pointer rounded-full p-0"
+                  type="color"
+                  aria-label="Custom text color"
+                  value={text.color}
+                  oninput={(e) => previewText({ color: e.currentTarget.value })}
+                  onchange={(e) =>
+                    void editText({ color: e.currentTarget.value }).catch(fail)}
+                />
+              </div>
             </div>
-          </div>
-          <div class="flex flex-wrap gap-[7px]">
-            <button
-              class={[toggle(text.bold && textFont?.bold), 'px-3']}
-              aria-pressed={text.bold && !!textFont?.bold}
-              disabled={!textFont?.bold}
-              title={textFont?.bold
-                ? undefined
-                : `${text.fontFamily} has no bold style`}
-              onclick={() => void editText({ bold: !text?.bold }).catch(fail)}
-              ><span class="font-bold">Bold</span></button
-            ><button
-              class={[toggle(text.italic && textFont?.italic), 'px-3 italic']}
-              aria-pressed={text.italic && !!textFont?.italic}
-              disabled={!textFont?.italic}
-              title={textFont?.italic
-                ? undefined
-                : `${text.fontFamily} has no italic style`}
-              onclick={() =>
-                void editText({ italic: !text?.italic }).catch(fail)}
-              >Italic</button
-            >
-          </div>
+          {/if}
+          {#if !emojiText || text.bold || text.italic}
+            <div class="flex flex-wrap gap-[7px]">
+              <button
+                class={[toggle(text.bold && textFont?.bold), 'px-3']}
+                aria-pressed={text.bold && !!textFont?.bold}
+                disabled={!textFont?.bold}
+                title={textFont?.bold
+                  ? undefined
+                  : `${text.fontFamily} has no bold style`}
+                onclick={() => void editText({ bold: !text?.bold }).catch(fail)}
+                ><span class="font-bold">Bold</span></button
+              ><button
+                class={[toggle(text.italic && textFont?.italic), 'px-3 italic']}
+                aria-pressed={text.italic && !!textFont?.italic}
+                disabled={!textFont?.italic}
+                title={textFont?.italic
+                  ? undefined
+                  : `${text.fontFamily} has no italic style`}
+                onclick={() =>
+                  void editText({ italic: !text?.italic }).catch(fail)}
+                >Italic</button
+              >
+            </div>
+          {/if}
           <div class="join" role="group" aria-label="Text alignment">
             {#each TEXT_ALIGNS as align (align)}
               <button
@@ -1313,35 +1322,37 @@
               >
             {/each}
           </div>
-          <div
-            class="flex min-h-[42px] items-center gap-3 text-sm text-neutral"
-          >
-            <label class="flex min-h-[42px] items-center gap-2"
-              ><input
-                class="checkbox size-5"
-                type="checkbox"
-                checked={!!text.highlight}
-                onchange={(e) =>
-                  void editText({
-                    highlight: e.currentTarget.checked
-                      ? DEFAULT_HIGHLIGHT
-                      : undefined,
-                  }).catch(fail)}
-              />Highlight</label
+          {#if !emojiText || text.highlight}
+            <div
+              class="flex min-h-[42px] items-center gap-3 text-sm text-neutral"
             >
-            {#if text.highlight}<input
-                class="size-[42px] cursor-pointer rounded-full p-0"
-                type="color"
-                aria-label="Highlight color"
-                value={text.highlight}
-                oninput={(e) =>
-                  previewText({ highlight: e.currentTarget.value })}
-                onchange={(e) =>
-                  void editText({ highlight: e.currentTarget.value }).catch(
-                    fail,
-                  )}
-              />{/if}
-          </div>
+              <label class="flex min-h-[42px] items-center gap-2"
+                ><input
+                  class="checkbox size-5"
+                  type="checkbox"
+                  checked={!!text.highlight}
+                  onchange={(e) =>
+                    void editText({
+                      highlight: e.currentTarget.checked
+                        ? DEFAULT_HIGHLIGHT
+                        : undefined,
+                    }).catch(fail)}
+                />Highlight</label
+              >
+              {#if text.highlight}<input
+                  class="size-[42px] cursor-pointer rounded-full p-0"
+                  type="color"
+                  aria-label="Highlight color"
+                  value={text.highlight}
+                  oninput={(e) =>
+                    previewText({ highlight: e.currentTarget.value })}
+                  onchange={(e) =>
+                    void editText({ highlight: e.currentTarget.value }).catch(
+                      fail,
+                    )}
+                />{/if}
+            </div>
+          {/if}
           <div class="flex flex-wrap gap-[7px]">
             <button
               class={[toolButton, 'px-3']}

@@ -703,9 +703,9 @@ const LINE_HEIGHT = 1.25;
 export const lineHeight = (l: TextLayer) => l.size * LINE_HEIGHT;
 // Text sits this far inside the box on both sides, so turning the highlight pill on never rewraps it.
 export const textPad = (l: TextLayer) => l.size * 0.3;
+const graphemes = new Intl.Segmenter();
 // Greedy word wrap; a word wider than `width` breaks between graphemes, so a line always takes at least one.
 export function wrapText(text: string, width: number, measure: (s: string) => number) {
-  const graphemes = new Intl.Segmenter();
   const lines: string[] = [];
   for (const paragraph of text.split('\n')) {
     let line = '';
@@ -765,13 +765,17 @@ export function resizeTextWidth(l: TextLayer, pointer: Point, side: string, max:
   };
 }
 // Fixed values, not theme tokens: text colors and fonts are project data.
-export const newText = (slide: number, slideHeight: number): TextLayer => {
-  const width = 720;
-  const size = 72;
+export const newText = (
+  slide: number,
+  slideHeight: number,
+  text = 'Your text',
+  size = 72,
+  width = 720,
+): TextLayer => {
   return {
     type: 'text',
     id: crypto.randomUUID(),
-    text: 'Your text',
+    text,
     fontFamily: 'DM Sans',
     size,
     color: TEXT_COLORS[0][1],
@@ -784,4 +788,82 @@ export const newText = (slide: number, slideHeight: number): TextLayer => {
     height: size * LINE_HEIGHT,
     rotation: 0,
   };
+};
+export const EMOJI_PICKS = [
+  ['😀', 'grinning face'],
+  ['😂', 'face with tears of joy'],
+  ['🥰', 'smiling face with hearts'],
+  ['😍', 'heart eyes'],
+  ['😎', 'smiling face with sunglasses'],
+  ['🤩', 'star struck'],
+  ['😜', 'winking face with tongue'],
+  ['🥹', 'face holding back tears'],
+  ['❤️', 'red heart'],
+  ['🧡', 'orange heart'],
+  ['💛', 'yellow heart'],
+  ['💚', 'green heart'],
+  ['💙', 'blue heart'],
+  ['💜', 'purple heart'],
+  ['💖', 'sparkling heart'],
+  ['💕', 'two hearts'],
+  ['🎉', 'party popper'],
+  ['🎊', 'confetti ball'],
+  ['🥳', 'partying face'],
+  ['🎈', 'balloon'],
+  ['🎁', 'wrapped gift'],
+  ['🎂', 'birthday cake'],
+  ['✨', 'sparkles'],
+  ['🥂', 'clinking glasses'],
+  ['🌸', 'cherry blossom'],
+  ['🌻', 'sunflower'],
+  ['🌿', 'herb'],
+  ['🌈', 'rainbow'],
+  ['☀️', 'sun'],
+  ['🌙', 'crescent moon'],
+  ['🌊', 'water wave'],
+  ['🐶', 'dog face'],
+  ['✈️', 'airplane'],
+  ['🚗', 'car'],
+  ['🗺️', 'world map'],
+  ['📍', 'round pushpin'],
+  ['📸', 'camera with flash'],
+  ['🏖️', 'beach with umbrella'],
+  ['⛰️', 'mountain'],
+  ['🧳', 'luggage'],
+  ['🍕', 'pizza'],
+  ['🍔', 'hamburger'],
+  ['🍣', 'sushi'],
+  ['🍜', 'steaming bowl'],
+  ['🍦', 'soft ice cream'],
+  ['🍓', 'strawberry'],
+  ['☕', 'hot beverage'],
+  ['🍹', 'tropical drink'],
+] as const;
+export const MAX_EMOJI = 8;
+const graphemeList = (text: string) =>
+  [...graphemes.segment(text)].map((g) => g.segment).filter((g) => g.trim());
+// Flags and keycaps are emoji without being Extended_Pictographic; plain ©®™ are too, but DM Sans draws them as text.
+const isEmojiGrapheme = (g: string) =>
+  /^\p{Regional_Indicator}{2}$|^[0-9#*]\uFE0F?\u20E3$/u.test(g) ||
+  (/\p{Extended_Pictographic}/u.test(g) && !/^[©®™]$/u.test(g));
+// The message to show for a typed emoji, or '' when it can be added.
+export function emojiError(text: string) {
+  if (!text.trim()) return 'Type or paste an emoji first.';
+  if (!graphemeList(text).some(isEmojiGrapheme)) return 'That has no emoji in it. Try pasting one.';
+  // The code unit cap stops one endless grapheme, as an oversized text makes the saved project unreadable.
+  if (graphemeList(text).length > MAX_EMOJI || text.length > MAX_EMOJI * 16)
+    return `That is too long. Use up to ${MAX_EMOJI} emoji.`;
+  return '';
+}
+export const isEmojiOnly = (text: string) => {
+  const list = graphemeList(text);
+  return list.length > 0 && list.every(isEmojiGrapheme);
+};
+// A bundled family, not a system emoji one: loadFonts can await it, and the canvas falls back per
+// glyph to the device's emoji font, so measuring, wrapping and export need no special case.
+export const newEmoji = (slide: number, slideHeight: number, text: string) => {
+  const size = 240;
+  // Emoji advances run to about 1.3em, and 0.6em is the padding.
+  const count = graphemeList(text).length;
+  return newText(slide, slideHeight, text, size, Math.min(WIDTH, size * (0.6 + 1.3 * count)));
 };

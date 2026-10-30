@@ -14,6 +14,9 @@
     reorderLayer,
     hitLayer,
     localPoint,
+    EMOJI_PICKS,
+    emojiError,
+    newEmoji,
     newText,
     resizeTextWidth,
     stack,
@@ -580,6 +583,38 @@
     selected = layer.id;
     onedittext(true);
   }
+  let emojiPicker = $state<HTMLElement>();
+  let emojiInput = $state('');
+  let emojiMessage = $state('');
+  async function addEmoji(emoji: string) {
+    if (!enabled || busy()) return;
+    emojiPicker?.hidePopover();
+    const layer = newEmoji(current, sceneHeight, emoji);
+    try {
+      await loadFonts([layer]);
+    } catch (e) {
+      onerror(e);
+      return;
+    }
+    if (!enabled) return;
+    const fitted = fitText(layer);
+    oncommit({
+      ...workspace,
+      overlays: [
+        ...workspace.overlays,
+        { ...fitted, y: (sceneHeight - fitted.height) / 2 },
+      ],
+    });
+    selected = layer.id;
+  }
+  function submitEmoji(event: SubmitEvent) {
+    event.preventDefault();
+    const emoji = emojiInput.trim();
+    emojiMessage = emojiError(emoji);
+    if (emojiMessage) return;
+    emojiInput = '';
+    void addEmoji(emoji);
+  }
   function keys(event: KeyboardEvent) {
     if (event.key === ' ' && event.target === viewport) {
       event.preventDefault();
@@ -711,7 +746,61 @@
     class={[toolButton, 'min-h-[42px]']}
     disabled={!enabled}
     onclick={addText}>Add text</button
+  ><button
+    class={[toolButton, 'min-h-[42px]']}
+    disabled={!enabled}
+    popovertarget="emoji-picker">Add emoji</button
   >
+  <!-- The default popover margin centres it; the CSS reset removes that, so m-auto puts it back. -->
+  <div
+    id="emoji-picker"
+    class="m-auto max-h-[90dvh] w-[min(340px,calc(100vw-24px))] overflow-auto rounded-lg border border-primary/20 bg-base-100 p-4 text-secondary shadow-lg"
+    popover="auto"
+    aria-label="Add emoji"
+    bind:this={emojiPicker}
+    ontoggle={(e) => {
+      if (e.newState === 'closed') emojiMessage = '';
+    }}
+  >
+    <div class="grid grid-cols-6 gap-1">
+      {#each EMOJI_PICKS as [emoji, name] (emoji)}
+        <button
+          class="btn size-[46px] border-0 bg-transparent p-0 text-[26px] font-normal shadow-none hover:bg-base-300"
+          aria-label={name}
+          title={name}
+          disabled={!enabled}
+          onclick={() => void addEmoji(emoji)}>{emoji}</button
+        >
+      {/each}
+    </div>
+    <form class="mt-3 flex gap-2" novalidate onsubmit={submitEmoji}>
+      <input
+        class="input h-auto min-h-[42px] min-w-0 flex-1 border-primary/30 px-[9px] text-base text-secondary"
+        aria-label="Type or paste an emoji"
+        aria-invalid={!!emojiMessage}
+        aria-describedby={emojiMessage ? 'emoji-message' : undefined}
+        placeholder="Type or paste an emoji"
+        autocomplete="off"
+        bind:value={emojiInput}
+        oninput={() => (emojiMessage = '')}
+      /><button
+        class={[toolButton, 'min-h-[42px]']}
+        type="submit"
+        disabled={!enabled}>Add</button
+      >
+    </form>
+    {#if emojiMessage}<p
+        id="emoji-message"
+        class="mt-2 text-sm text-error"
+        role="alert"
+      >
+        {emojiMessage}
+      </p>{/if}
+    <p class="mt-2 text-sm leading-[1.5] text-neutral">
+      Emoji use this device's emoji font, so they can look different when made
+      on another device.
+    </p>
+  </div>
   {#if chosen?.type === 'text'}
     <span>Edit the selected text in the side panel.</span>
   {:else if chosenPhoto}

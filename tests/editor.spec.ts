@@ -1636,6 +1636,128 @@ test('typing and a width drag on a cold font settle to the real-font height outs
   const fixed = await textLayer(page);
   expect(await realHeight(page)).toBeCloseTo(fixed.height);
 });
+async function pickEmoji(page: Page, name: string) {
+  await page.getByRole('button', { name: 'Add emoji', exact: true }).click();
+  await page.getByRole('button', { name, exact: true }).click();
+}
+test('emoji are added from the grid or pasted, cross a seam, reload and undo as one step', async ({
+  page,
+}) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  const open = page.getByRole('button', { name: 'Add emoji', exact: true });
+  const grid = page.locator('#emoji-picker');
+
+  // Keyboard reachable, big enough to hit, and Escape closes it.
+  await open.click();
+  await expect(grid).toBeVisible();
+  const party = page.getByRole('button', { name: 'party popper' });
+  expect((await party.boundingBox())!.height).toBeGreaterThanOrEqual(42);
+  expect(await grid.getByRole('button').count()).toBeGreaterThanOrEqual(48);
+  await party.focus();
+  await page.keyboard.press('Escape');
+  await expect(grid).toBeHidden();
+
+  // Invalid input shows a message and adds nothing.
+  await open.click();
+  const field = page.getByLabel('Type or paste an emoji');
+  const add = grid.getByRole('button', { name: 'Add', exact: true });
+  await add.click();
+  await expect(grid.getByRole('alert')).toContainText('Type or paste');
+  await field.fill('hello');
+  await add.click();
+  await expect(grid.getByRole('alert')).toContainText('no emoji');
+  await field.fill('🎉'.repeat(9));
+  await field.press('Enter');
+  await expect(grid.getByRole('alert')).toContainText('too long');
+  await expect(page.locator('.text-hit')).toHaveCount(0);
+  await page.keyboard.press('Escape');
+
+  // From the grid: large, centred, selected, one undo step.
+  await pickEmoji(page, 'party popper');
+  await expect(grid).toBeHidden();
+  await expect(page.locator('.text-hit')).toHaveCount(1);
+  let t = await textLayer(page);
+  expect(t).toMatchObject({ text: '🎉', size: 240, fontFamily: 'DM Sans' });
+  expect(t.x + t.width / 2).toBeCloseTo(1620);
+  expect(t.y + t.height / 2).toBeCloseTo(675);
+  await expect(page.getByRole('region', { name: 'Edit text' })).toBeVisible();
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expect(page.locator('.text-hit')).toHaveCount(0);
+  await expect.poll(async () => (await saved(page)).workspace.overlays.length).toBe(0);
+  await page.getByRole('button', { name: 'Redo', exact: true }).click();
+  await expect(page.locator('.text-hit')).toHaveCount(1);
+
+  // Controls that do nothing for an emoji are gone; the useful ones stay.
+  const panel = page.getByRole('region', { name: 'Edit text' });
+  for (const name of ['Bold', 'Italic', 'Coral text', 'Custom text color'])
+    await expect(panel.getByRole('button', { name })).toHaveCount(0);
+  await expect(panel.getByLabel('Font', { exact: true })).toHaveCount(0);
+  await expect(panel.getByLabel('Highlight', { exact: true })).toHaveCount(0);
+  await expect(panel.getByLabel('Custom text color')).toHaveCount(0);
+  await expect(panel.getByLabel('Text size')).toBeVisible();
+  await expect(panel.getByRole('button', { name: 'Layer up' })).toBeVisible();
+  await expect(panel.getByRole('button', { name: 'Delete text' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Rotate text' })).toBeVisible();
+  // Typing words makes it ordinary text again.
+  const text = panel.getByLabel('Text', { exact: true });
+  await text.fill('🎉 party');
+  await expect(panel.getByRole('button', { name: 'Bold' })).toBeVisible();
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expect(panel.getByRole('button', { name: 'Bold' })).toHaveCount(0);
+
+  // Drag across the seam between slides 2 and 3: both exported slides get pixels.
+  t = await textLayer(page);
+  const hit = page.locator('.text-hit');
+  const scale = (await hit.boundingBox())!.width / t.width;
+  await drag(page, '.text-hit', (2160 - (t.x + t.width / 2)) * scale, 0);
+  await expect.poll(async () => (await textLayer(page)).x).not.toBe(t.x);
+  t = await textLayer(page);
+  expect(t.x).toBeLessThan(2160);
+  expect(t.x + t.width).toBeGreaterThan(2160);
+  const files = await exported(page);
+  const left = await inkRows(page, files[1].bytes, 1040, 1080, CREAM);
+  const right = await inkRows(page, files[2].bytes, 0, 40, CREAM);
+  expect(left.length).toBeGreaterThan(20);
+  expect(right.length).toBeGreaterThan(20);
+  expect((await inkRows(page, files[0].bytes, 0, 1080, CREAM)).length).toBe(0);
+
+  // A pasted sequence stays one cluster and one line, on top of the first.
+  await open.click();
+  await field.fill('👨‍👩‍👧‍👦🇮🇳');
+  await add.click();
+  await expect(grid).toBeHidden();
+  await expect(page.locator('.text-hit')).toHaveCount(2);
+  await expect.poll(async () => (await saved(page)).workspace.overlays[1]?.text).toBe('👨‍👩‍👧‍👦🇮🇳');
+  const pasted = (await saved(page)).workspace.overlays[1];
+  expect(pasted.height).toBe(240 * 1.25);
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expect(page.locator('.text-hit')).toHaveCount(1);
+
+  // Text layers are shared, so it survives a style switch and a reload.
+  await saved(page);
+  await page.getByRole('button', { name: /Scrapbook/ }).click();
+  await expect(page.locator('.text-hit')).toHaveCount(1);
+  await saved(page);
+  await page.reload();
+  await expect(page.locator('.text-hit')).toHaveCount(1);
+  expect((await textLayer(page)).text).toBe('🎉');
+  expect(errors).toEqual([]);
+});
+test('a highlight set before text became emoji can still be turned off', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.goto('/');
+  await addText(page);
+  const panel = page.getByRole('region', { name: 'Edit text' });
+  await panel.getByLabel('Highlight', { exact: true }).check();
+  await panel.getByLabel('Text', { exact: true }).fill('🎉');
+  const toggle = panel.getByLabel('Highlight', { exact: true });
+  await toggle.click();
+  await expect(toggle).toHaveCount(0);
+});
 test('a mouse double-click on a photo enters crop mode', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 1100 });
   await page.goto('/');

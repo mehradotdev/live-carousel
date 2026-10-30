@@ -32,6 +32,10 @@ import {
   textLines,
   updateLayer,
   wrapText,
+  emojiError,
+  isEmojiOnly,
+  MAX_EMOJI,
+  newEmoji,
   TEXT_MIN_WIDTH,
   type Asset,
   type BentoNode,
@@ -508,6 +512,34 @@ describe('text layers', () => {
     expect(wrapText('abc', 1, chars)).toEqual(['a', 'b', 'c']);
     // Emoji sequences stay whole.
     expect(wrapText('👩‍🚀👩‍🚀', 1, chars)).toEqual(['👩‍🚀', '👩‍🚀']);
+    const clusters = ['👨‍👩‍👧‍👦', '🇮🇳', '👍🏽', '1️⃣', '❤️'];
+    expect(wrapText(clusters.join(''), 1, chars)).toEqual(clusters);
+    // A cluster wider than the box stays whole among words too.
+    expect(wrapText('a 👨‍👩‍👧‍👦 🇮🇳🇯🇵', 1, chars)).toEqual(['a', '👨‍👩‍👧‍👦', '🇮🇳', '🇯🇵']);
+  });
+  it('accepts anything holding an emoji and rejects empty, emoji-free or long input', () => {
+    for (const ok of ['🎉', '❤️', '👍🏽', '👨‍👩‍👧‍👦', '🇮🇳', '1️⃣', 'hi 🎉', '🎉'.repeat(MAX_EMOJI)])
+      expect(emojiError(ok)).toBe('');
+    expect(emojiError('')).toMatch(/first/);
+    expect(emojiError('   ')).toMatch(/first/);
+    for (const bad of ['hello', '123', '#', ':)', '🇮', '\u20E3', 'a\u20E3', '©', '®', '™'])
+      expect(emojiError(bad)).toMatch(/no emoji/);
+    expect(emojiError('🎉'.repeat(MAX_EMOJI + 1))).toMatch(/too long/);
+    // One grapheme, however many marks it stacks, still has to stay short.
+    expect(emojiError('🎉' + '\u0301'.repeat(500))).toMatch(/too long/);
+  });
+  it('treats only text made entirely of emoji as emoji-only', () => {
+    for (const yes of ['🎉', '🎉 ❤️', '👨‍👩‍👧‍👦🇮🇳', '1️⃣', '©\uFE0F']) expect(isEmojiOnly(yes)).toBe(true);
+    for (const no of ['', ' ', 'hi 🎉', 'abc', '1', '🇮', 'a\u20E3', '©', '™'])
+      expect(isEmojiOnly(no)).toBe(false);
+  });
+  it('places an emoji large and centred, with room for each one', () => {
+    const one = newEmoji(2, 1350, '🎉');
+    expect(one).toMatchObject({ type: 'text', text: '🎉', size: 240 });
+    expect(one.x + one.width / 2).toBeCloseTo(2 * 1080 + 540);
+    expect(one.y + one.height / 2).toBeCloseTo(675);
+    expect(newEmoji(0, 1350, '👨‍👩‍👧‍👦🇮🇳').width).toBeGreaterThan(one.width);
+    expect(newEmoji(0, 1350, '🎉'.repeat(MAX_EMOJI)).width).toBe(1080);
   });
   it('wraps inside the padding and fits the height to the lines, keeping the rotated top edge', () => {
     const l = { ...newText(0, 1350), text: 'aa bb cc', size: 100, width: 110, rotation: 90 };
