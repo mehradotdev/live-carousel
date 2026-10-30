@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
 import {
   ASPECTS,
+  MAX_TEXT,
   MIN_TILE,
   TEMPLATES,
+  TEXT_SIZE,
   WIDTH,
   addToBento,
   applyBento,
@@ -12,16 +14,19 @@ import {
   resize,
   resizeDivider,
   setSpacing,
+  newText,
   slideLayers,
   type Aspect,
   type Asset,
   type BentoNode,
   type Layer,
+  type TextLayer,
   type Workspace,
 } from './model';
 import { draw, paint, previewCache, previewEdges, sourceRect, syncPreviews } from './render';
 import { fit, MASTER, PREVIEW, transparent, validProject } from './storage';
 const layer = (x: number, extra: Partial<Layer> = {}): Layer => ({
+  type: 'photo',
   id: `l${x}`,
   assetId: 'a',
   x,
@@ -40,7 +45,7 @@ const recorder = (calls: [string, unknown[]][]) => {
     get:
       (_, key: string) =>
       (...args: unknown[]) =>
-        calls.push([key, args]),
+        key === 'measureText' ? { width: 10 } : calls.push([key, args]),
     set: () => true,
   });
   return { width: 0, height: 0, getContext: () => ctx } as unknown as HTMLCanvasElement;
@@ -87,6 +92,7 @@ describe('image pipeline', () => {
         style: 'bento',
         background: '#fff',
         bento: { layers: [], radius: 0 },
+        overlays: [],
       } as unknown as Workspace;
       for (let i = 0; i < slides; i++) {
         const calls: [string, unknown[]][] = [];
@@ -111,6 +117,7 @@ describe('image pipeline', () => {
       style: 'bento',
       background: '#fff',
       bento: { layers, radius: 0 },
+      overlays: [],
     };
     const image = { width: 1440, height: 960 } as ImageBitmap;
     paint(
@@ -139,7 +146,8 @@ describe('image pipeline', () => {
         style,
         background: '#fff',
         bento: { layers: [layer(0)], radius: 30 },
-        scrapbook: { layers: [layer(0)] },
+        scrapbook: { layers: [layer(0)], order: [] },
+        overlays: [],
       } as unknown as Workspace,
       assets: [asset],
     });
@@ -185,11 +193,61 @@ describe('image pipeline', () => {
     const far = layer(2 * WIDTH + 300);
     const w = {
       style: 'scrapbook',
-      scrapbook: { layers: [layer(100), seam, far] },
+      scrapbook: { layers: [layer(100), seam, far], order: [] },
+      overlays: [],
     } as unknown as Workspace;
     expect(slideLayers(w, 0).map((l) => l.id)).toEqual(['l100', seam.id]);
     expect(slideLayers(w, 1).map((l) => l.id)).toEqual([seam.id]);
     expect(slideLayers(w, 2).map((l) => l.id)).toEqual([far.id]);
+    const text = (x: number, extra: Partial<TextLayer> = {}) => ({
+      ...newText(0, 1350),
+      id: `t${x}`,
+      x,
+      width: 400,
+      height: 90,
+      size: 72,
+      ...extra,
+    });
+    const seamText = text(WIDTH - 200);
+    const turned = text(2 * WIDTH - 900, { rotation: 90, width: 1600 });
+    const withText = { ...w, overlays: [seamText, turned, text(2 * WIDTH + 400)] };
+    expect(slideLayers(withText, 0).map((l) => l.id)).toContain(seamText.id);
+    expect(slideLayers(withText, 1).map((l) => l.id)).toContain(seamText.id);
+    expect(slideLayers(withText, 1).map((l) => l.id)).toContain(turned.id);
+    expect(slideLayers(withText, 0).map((l) => l.id)).not.toContain('t2560');
+    expect(slideLayers(withText, 2).map((l) => l.id)).not.toContain(seamText.id);
+    expect(slideLayers(withText, 2).map((l) => l.id)).toContain('t2560');
+  });
+  it('export waits for every font before painting and fails rather than draw a fallback', async () => {
+    const load = vi.fn(async (font: string) =>
+      font.includes('Missing') ? [] : ([{}] as FontFace[]),
+    );
+    vi.stubGlobal('document', { fonts: { load } });
+    const calls: [string, unknown[]][] = [];
+    const canvas = recorder(calls);
+    const text = { ...newText(0, 1350), id: 't', fontFamily: 'Caveat', italic: true, bold: true };
+    const workspace = {
+      aspect: '4:5',
+      slides: 1,
+      style: 'bento',
+      background: '#fff',
+      bento: { layers: [], radius: 0 },
+      overlays: [text],
+    } as unknown as Workspace;
+    await draw({ workspace, assets: [] }, canvas, 1, 0);
+    // Caveat has no italic face, so neither the load nor the paint asks for one.
+    expect(load).toHaveBeenCalledWith('normal 700 16px "Caveat"', 'AĀ');
+    expect(calls.find(([k]) => k === 'fillText')?.[1]).toEqual([
+      'Your text',
+      0,
+      expect.any(Number),
+    ]);
+    const missing = { ...text, fontFamily: 'Missing' };
+    const blank = recorder([]);
+    await expect(
+      draw({ workspace: { ...workspace, overlays: [missing] }, assets: [] }, blank, 1, 0),
+    ).rejects.toThrow('The font Missing could not load');
+    expect(blank.width).toBe(0);
   });
   it('export holds at most one decoded master, painting layers in z-order', async () => {
     const events: string[] = [];
@@ -207,6 +265,7 @@ describe('image pipeline', () => {
       style: 'bento',
       background: '#fff',
       bento: { layers, radius: 0 },
+      overlays: [],
     } as unknown as Workspace;
     const original = calls.push.bind(calls);
     calls.push = (...c) => (c[0][0] === 'drawImage' && events.push('paint'), original(...c));
@@ -299,7 +358,8 @@ describe('image pipeline', () => {
             margin: 24,
             radius: 0,
           },
-          scrapbook: { layers: [layer(0)] },
+          scrapbook: { layers: [layer(0)], order: ['l0', 't'] },
+          overlays: [{ ...newText(0, 1350), id: 't' }],
         },
         assetIds: ['a'],
       },
@@ -321,6 +381,32 @@ describe('image pipeline', () => {
       (p) => (p.record.workspace.scrapbook.layers[0].x = NaN),
       (p) => (p.record.workspace.style = 'grid'),
       (p) => (p.record.workspace.bento.template = 'spiral'),
+      (p) => ((p.record.workspace as { overlays: unknown }).overlays = undefined),
+      (p) => ((p.record.workspace.overlays as unknown[]) = [null]),
+      (p) => ((p.record.workspace.overlays[0] as { type: string }).type = 'photo'),
+      (p) => ((p.record.workspace.overlays[0] as { text: unknown }).text = 5),
+      (p) => (p.record.workspace.overlays[0].text = 'x'.repeat(MAX_TEXT + 1)),
+      (p) => (p.record.workspace.overlays[0].fontFamily = ''),
+      (p) => (p.record.workspace.overlays[0].fontFamily = 'A"; x'),
+      (p) => (p.record.workspace.overlays[0].size = TEXT_SIZE.min - 1),
+      (p) => (p.record.workspace.overlays[0].size = TEXT_SIZE.max + 1),
+      (p) => (p.record.workspace.overlays[0].size = NaN),
+      (p) => (p.record.workspace.overlays[0].x = Infinity),
+      (p) => (p.record.workspace.overlays[0].width = 0),
+      (p) => (p.record.workspace.overlays[0].height = -1),
+      (p) => (p.record.workspace.overlays[0].rotation = NaN),
+      (p) => (p.record.workspace.overlays[0].color = 'red'),
+      (p) => (p.record.workspace.overlays[0].color = '#fff'),
+      (p) => (p.record.workspace.overlays[0].highlight = 'yellow'),
+      (p) => ((p.record.workspace.overlays[0] as { bold: unknown }).bold = 1),
+      (p) => ((p.record.workspace.overlays[0] as { italic: unknown }).italic = 'no'),
+      (p) => ((p.record.workspace.overlays[0] as { align: string }).align = 'justify'),
+      (p) => p.record.workspace.overlays.push(p.record.workspace.overlays[0]),
+      (p) => (p.record.workspace.overlays[0].id = 'l0'),
+      (p) => ((p.record.workspace.scrapbook as { order: unknown }).order = undefined),
+      (p) => p.record.workspace.scrapbook.order.push('ghost'),
+      (p) => p.record.workspace.scrapbook.order.push('t'),
+      (p) => ((p.record.workspace.bento.layers[0] as { type: string }).type = 'text'),
       (p) => (p.record.workspace.bento.gap = -1),
       (p) => (p.record.workspace.bento.gap = 61),
       (p) => (p.record.workspace.bento.margin = 121),

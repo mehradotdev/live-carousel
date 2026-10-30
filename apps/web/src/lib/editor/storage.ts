@@ -4,21 +4,25 @@ import {
   MAX_PHOTOS,
   MAX_SLIDES,
   MIN_TILE,
+  MAX_TEXT,
   SPACING_MAX,
   TEMPLATES,
+  TEXT_ALIGNS,
+  TEXT_SIZE,
   applyBento,
   type Asset,
   type BentoNode,
   type Layer,
   type Project,
   type Spacing,
+  type TextLayer,
   type Workspace,
 } from './model';
 import { blob } from './render';
 export const MASTER = 4096;
 export const PREVIEW = 1440;
 const db = () =>
-  openDB('living-carousel-v4', 1, {
+  openDB('living-carousel-v5', 1, {
     upgrade(db) {
       db.createObjectStore('project');
       db.createObjectStore('assets', { keyPath: 'id' });
@@ -28,6 +32,33 @@ const finite = (n: unknown): n is number => typeof n === 'number' && Number.isFi
 const NUMBERS = ['x', 'y', 'width', 'height', 'rotation', 'zoom', 'panX', 'panY'] as const;
 const GEOMETRY = ['x', 'y', 'width', 'height', 'rotation'] as const;
 const TOLERANCE = 0.001;
+const HEX = /^#[0-9a-f]{6}$/i;
+// The name lands in a canvas font string, so it cannot be allowed to end its quotes.
+const FONT_NAME = /^[^"\\\n]{1,100}$/;
+function textOk(l: TextLayer | null) {
+  return (
+    !!l &&
+    typeof l === 'object' &&
+    l.type === 'text' &&
+    typeof l.id === 'string' &&
+    typeof l.text === 'string' &&
+    l.text.length <= MAX_TEXT &&
+    typeof l.fontFamily === 'string' &&
+    FONT_NAME.test(l.fontFamily) &&
+    GEOMETRY.every((k) => finite(l[k])) &&
+    l.width > 0 &&
+    l.height > 0 &&
+    finite(l.size) &&
+    l.size >= TEXT_SIZE.min &&
+    l.size <= TEXT_SIZE.max &&
+    typeof l.color === 'string' &&
+    HEX.test(l.color) &&
+    (l.highlight === undefined || (typeof l.highlight === 'string' && HEX.test(l.highlight))) &&
+    typeof l.bold === 'boolean' &&
+    typeof l.italic === 'boolean' &&
+    TEXT_ALIGNS.includes(l.align)
+  );
+}
 // Collects leaf ids; false for any malformed node.
 function treeLeaves(node: BentoNode | null | undefined, out: string[]): boolean {
   if (!node || typeof node !== 'object') return false;
@@ -48,11 +79,12 @@ export function validProject(
 ): record is { workspace: Workspace } {
   const r = record as { workspace?: Workspace; assetIds?: unknown[] } | undefined;
   const ids = r?.assetIds;
-  const { aspect, slides = 0, style, background, bento, scrapbook } = r?.workspace ?? {};
+  const { aspect, slides = 0, style, background, bento, scrapbook, overlays } = r?.workspace ?? {};
   if (!Array.isArray(ids) || ids.length > MAX_PHOTOS) return false;
   if (!Array.isArray(bento?.layers) || !Array.isArray(scrapbook?.layers)) return false;
+  if (!Array.isArray(overlays) || !Array.isArray(scrapbook.order)) return false;
   if (style !== 'bento' && style !== 'scrapbook') return false;
-  if (typeof background !== 'string' || !/^#[0-9a-f]{6}$/i.test(background)) return false;
+  if (typeof background !== 'string' || !HEX.test(background)) return false;
   if (!TEMPLATES.includes(bento.template)) return false;
   const spacingOk = (Object.keys(SPACING_MAX) as (keyof Spacing)[]).every(
     (k) => finite(bento[k]) && bento[k] >= 0 && bento[k] <= SPACING_MAX[k],
@@ -83,7 +115,11 @@ export function validProject(
       if (!l || typeof l !== 'object' || typeof l.id !== 'string' || seen.has(l.id)) return false;
       seen.add(l.id);
       return (
-        ids.includes(l.assetId) && NUMBERS.every((k) => finite(l[k])) && l.width > 0 && l.height > 0
+        l.type === 'photo' &&
+        ids.includes(l.assetId) &&
+        NUMBERS.every((k) => finite(l[k])) &&
+        l.width > 0 &&
+        l.height > 0
       );
     });
   };
@@ -96,6 +132,15 @@ export function validProject(
     new Set(leaves).size === leaves.length &&
     leaves.every((id) => cells.has(id));
   if (!assetOk || !layersOk(bento.layers) || !layersOk(scrapbook.layers) || !treeOk) return false;
+  if (!overlays.every(textOk)) return false;
+  // Text ids share a stack with both layouts' photos, and `order` may only name what exists.
+  const textIds = overlays.map((l) => l.id);
+  const photoIds = [...bento.layers, ...scrapbook.layers].map((l) => l.id);
+  if (new Set(textIds).size !== textIds.length || textIds.some((id) => photoIds.includes(id)))
+    return false;
+  const listed = new Set([...scrapbook.layers.map((l) => l.id), ...textIds]);
+  const { order } = scrapbook;
+  if (new Set(order).size !== order.length || !order.every((id) => listed.has(id))) return false;
   // The next Bento edit recomputes every cell from the tree, so the two must already agree.
   return applyBento(r!.workspace!).bento.layers.every(
     (cell, i) =>

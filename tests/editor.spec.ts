@@ -719,7 +719,7 @@ test('an unreadable saved collage shows an error and is not overwritten by autos
     page.evaluate(
       (change) =>
         new Promise<unknown>((resolve, reject) => {
-          const open = indexedDB.open('living-carousel-v4');
+          const open = indexedDB.open('living-carousel-v5');
           open.onerror = () => reject(open.error);
           open.onsuccess = () => {
             const store = open.result.transaction('project', 'readwrite').objectStore('project');
@@ -1177,7 +1177,7 @@ test('switching style restores each layout and new photos reach both', async ({ 
   const stored = await page.evaluate(
     () =>
       new Promise<number>((resolve) => {
-        const open = indexedDB.open('living-carousel-v4');
+        const open = indexedDB.open('living-carousel-v5');
         open.onsuccess = () => {
           const count = open.result.transaction('assets').objectStore('assets').count();
           count.onsuccess = () => {
@@ -1188,4 +1188,474 @@ test('switching style restores each layout and new photos reach both', async ({ 
       }),
   );
   expect(stored).toBe(4);
+});
+
+// Rows in an exported PNG's column band whose pixels differ from the background.
+const inkRows = (page: Page, png: Buffer, from: number, to: number, background: number[]) =>
+  page.evaluate(
+    async ({ data, from, to, background }) => {
+      const blob = await (await fetch('data:image/png;base64,' + data)).blob();
+      const image = await createImageBitmap(blob);
+      const canvas = document.createElement('canvas');
+      canvas.width = image.width;
+      canvas.height = image.height;
+      const ctx = canvas.getContext('2d')!;
+      ctx.drawImage(image, 0, 0);
+      const pixels = ctx.getImageData(from, 0, to - from, image.height).data;
+      const rows = new Set<number>();
+      for (let i = 0; i < pixels.length; i += 4)
+        if ([0, 1, 2].some((c) => Math.abs(pixels[i + c] - background[c]) > 40))
+          rows.add(Math.floor(i / 4 / (to - from)));
+      return [...rows];
+    },
+    { data: png.toString('base64'), from, to, background },
+  );
+const CREAM = [0xf3, 0xee, 0xe4];
+async function addText(page: Page) {
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await page.getByRole('button', { name: 'Add text', exact: true }).click();
+  await expect(page.locator('.text-hit')).toHaveCount(1);
+  await expect(page.getByLabel('Text', { exact: true })).toBeFocused();
+}
+const textLayer = async (page: Page) => (await saved(page)).workspace.overlays[0];
+test('text is edited in the side panel, crosses a seam, exports on both slides, reloads and undoes', async ({
+  page,
+}) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.goto('/');
+  await addText(page);
+  // Added to the middle of the slide in view, as one history step.
+  let t = await textLayer(page);
+  expect(t.x + t.width / 2).toBeCloseTo(1620);
+  expect(t.y + t.height / 2).toBeCloseTo(675);
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expect(page.locator('.text-hit')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Redo', exact: true }).click();
+  await page.locator('.text-hit').click();
+
+  // A burst of typing is one history step, and the box height follows the wrapped lines.
+  const field = page.getByLabel('Text', { exact: true });
+  const before = (await textLayer(page)).text;
+  await field.focus();
+  await field.fill('');
+  await field.pressSequentially('MMMMMMMM MMMMMMMM', { delay: 5 });
+  await expect.poll(async () => (await textLayer(page)).text).toBe('MMMMMMMM MMMMMMMM');
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expect(field).toHaveValue(before);
+  await page.getByRole('button', { name: 'Redo', exact: true }).click();
+  await expect(field).toHaveValue('MMMMMMMM MMMMMMMM');
+  await page.getByLabel('Font', { exact: true }).selectOption('Playfair Display');
+  await page.getByLabel('Text size').fill('150');
+  await page.getByRole('button', { name: 'Coral text' }).click();
+  await page.getByRole('button', { name: 'Bold' }).click();
+  await page.getByRole('button', { name: 'left', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'left', exact: true })).toHaveAttribute(
+    'aria-pressed',
+    'true',
+  );
+  await expect.poll(async () => (await textLayer(page)).align).toBe('left');
+  t = await textLayer(page);
+  expect(t).toMatchObject({
+    fontFamily: 'Playfair Display',
+    size: 150,
+    color: '#e4572e',
+    bold: true,
+  });
+  // 16 wide capitals at 150px cannot fit 720 on one line.
+  expect(t.height).toBeGreaterThan(150 * 1.25 * 1.5);
+
+  // Fonts missing a face disable the toggle and draw without it.
+  await page.getByLabel('Font', { exact: true }).selectOption('Anton');
+  await expect(page.getByRole('button', { name: 'Bold' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Italic' })).toBeDisabled();
+  await page.getByLabel('Font', { exact: true }).selectOption('Playfair Display');
+  await expect(page.getByRole('button', { name: 'Bold' })).toHaveAttribute('aria-pressed', 'true');
+
+  // Controls stay readable and big enough to hit.
+  for (const name of ['Bold', 'Layer up', 'Delete text', 'Coral text'])
+    expect((await page.getByRole('button', { name }).boundingBox())!.height).toBeGreaterThanOrEqual(
+      42,
+    );
+  const sizes = await page
+    .getByRole('region', { name: 'Edit text' })
+    .locator('label, button, select, textarea')
+    .evaluateAll((nodes) => nodes.map((n) => parseFloat(getComputedStyle(n).fontSize)));
+  expect(Math.min(...sizes)).toBeGreaterThanOrEqual(14);
+
+  // Drag across the seam between slides 2 and 3.
+  t = await textLayer(page);
+  const hit = page.locator('.text-hit');
+  const scale = (await hit.boundingBox())!.width / t.width;
+  const distance = 2160 - (t.x + t.width / 2);
+  await drag(page, '.text-hit', distance * scale, 0);
+  await expect.poll(async () => (await textLayer(page)).x).not.toBe(t.x);
+  t = await textLayer(page);
+  expect(t.x).toBeLessThan(2160);
+  expect(t.x + t.width).toBeGreaterThan(2160);
+
+  // Pixels appear on both sides of the seam, on the same rows, and match the editor paint exactly.
+  const files = await exported(page);
+  const left = await inkRows(page, files[1].bytes, 1040, 1080, CREAM);
+  const right = await inkRows(page, files[2].bytes, 0, 40, CREAM);
+  expect(left.length).toBeGreaterThan(20);
+  expect(left.filter((y) => right.includes(y)).length).toBeGreaterThan(20);
+  expect(await inkRows(page, files[0].bytes, 0, 1080, CREAM)).toEqual([]);
+  const worst = await page.evaluate(
+    async (encoded) => {
+      const storage = await import('/src/lib/editor/storage.ts' as string);
+      const renderer = await import('/src/lib/editor/render.ts' as string);
+      const project = await storage.loadProject();
+      const view = Object.assign(document.createElement('canvas'), { width: 3240, height: 1350 });
+      await renderer.loadFonts(project.workspace.overlays);
+      renderer.paint(project, new Map(), view, { x: 0, y: 0, scale: 1 });
+      const strip = Object.assign(document.createElement('canvas'), { width: 3240, height: 1350 });
+      for (let i = 0; i < encoded.length; i++) {
+        const blob = await (await fetch('data:image/png;base64,' + encoded[i])).blob();
+        strip.getContext('2d')!.drawImage(await createImageBitmap(blob), i * 1080, 0);
+      }
+      const a = view.getContext('2d')!.getImageData(0, 0, 3240, 1350).data;
+      const b = strip.getContext('2d')!.getImageData(0, 0, 3240, 1350).data;
+      let max = 0;
+      for (let p = 0; p < a.length; p++) max = Math.max(max, Math.abs(a[p] - b[p]));
+      return max;
+    },
+    files.map((f) => f.bytes.toString('base64')),
+  );
+  expect(worst).toBeLessThanOrEqual(1);
+
+  // Shared across styles and through a reload.
+  await page.getByRole('button', { name: /Scrapbook/ }).click();
+  await expect(page.locator('.text-hit')).toHaveCount(1);
+  expect(await textLayer(page)).toEqual(t);
+  const final = (await saved(page)).workspace;
+  await page.reload();
+  await expect(page.locator('.text-hit')).toHaveCount(1);
+  expect((await saved(page)).workspace).toEqual(final);
+  await page.getByRole('button', { name: /Bento/ }).click();
+  await expect(page.locator('.text-hit')).toHaveCount(1);
+
+  // Delete is one undo step; double-click and the keyboard reach the same layer.
+  await page.locator('.text-hit').click();
+  await page.keyboard.press('Delete');
+  await expect(page.locator('.text-hit')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expect(page.locator('.text-hit')).toHaveCount(1);
+  expect(await textLayer(page)).toEqual(t);
+  await page.locator('.text-hit').dblclick();
+  await expect(field).toBeFocused();
+  await page.screenshot({ path: 'test-results/text-panel.png', fullPage: true });
+  expect(errors).toEqual([]);
+});
+test('text moves, resizes, rotates and nudges in Bento without swapping photos', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await upload(page, 3);
+  await addText(page);
+  const photos = (await saved(page)).workspace.layers;
+  await page.locator('.text-hit').click();
+  // Nudges move the text, and never swap the photos beneath it.
+  let t = await textLayer(page);
+  await page.keyboard.press('ArrowRight');
+  await page.keyboard.press('Shift+ArrowDown');
+  await expect.poll(async () => (await textLayer(page)).x).toBe(t.x + 1);
+  expect((await textLayer(page)).y).toBe(t.y + 10);
+  expect((await saved(page)).workspace.layers).toEqual(photos);
+  // A width handle rewraps: the box narrows and grows taller, and the font size stays.
+  t = await textLayer(page);
+  await page.getByLabel('Text', { exact: true }).fill('Several words wrapping here');
+  await expect.poll(async () => (await textLayer(page)).text).toContain('wrapping');
+  await page.locator('.text-hit').click();
+  t = await textLayer(page);
+  await drag(page, '[aria-label="Resize text width e"]', -60, 0);
+  await expect.poll(async () => (await textLayer(page)).width).toBeLessThan(t.width);
+  const narrow = await textLayer(page);
+  expect(narrow.height).toBeGreaterThan(t.height);
+  expect(narrow.size).toBe(t.size);
+  expect(narrow.x).toBeCloseTo(t.x);
+  await drag(page, '[aria-label="Rotate text"]', 80, 60);
+  await expect.poll(async () => (await textLayer(page)).rotation).not.toBe(0);
+  const turned = await textLayer(page);
+  // Selection follows rotation: the middle of the turned button still grabs it.
+  const box = (await page.locator('.text-hit').boundingBox())!;
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  await expect(page.locator('.text-hit')).toHaveAttribute('aria-pressed', 'true');
+  await drag(page, '.text-hit', 30, 10);
+  await expect.poll(async () => (await textLayer(page)).x).not.toBe(turned.x);
+  expect((await saved(page)).workspace.layers).toEqual(photos);
+  // A format change scales it with the slide and keeps it valid across a reload.
+  await page.getByRole('button', { name: /^1:1/ }).click();
+  await expect.poll(async () => (await textLayer(page)).size).toBeLessThan(t.size);
+  const scaled = await textLayer(page);
+  await page.reload();
+  await expect(page.locator('.text-hit')).toHaveCount(1);
+  expect(await textLayer(page)).toEqual(scaled);
+});
+test('layer order changes which of a photo and text wins the pixels in Scrapbook and Bento text order', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await upload(page, 1);
+  await page.getByRole('button', { name: /Scrapbook/ }).click();
+  await saved(page);
+  await page.getByLabel('Photo width', { exact: true }).fill('800');
+  await page.getByLabel('Photo width', { exact: true }).press('Tab');
+  await page.getByLabel('Photo rotation', { exact: true }).fill('0');
+  await page.getByLabel('Photo rotation', { exact: true }).press('Tab');
+  const photo = (await saved(page)).workspace.layers[0];
+  await page
+    .getByLabel('Photo position X', { exact: true })
+    .fill(String(Math.round(1620 - photo.width / 2)));
+  await page.getByLabel('Photo position X', { exact: true }).press('Tab');
+  await page
+    .getByLabel('Photo position Y', { exact: true })
+    .fill(String(Math.round(675 - photo.height / 2)));
+  await page.getByLabel('Photo position Y', { exact: true }).press('Tab');
+  await addText(page);
+  await page.getByLabel('Highlight', { exact: true }).check();
+  await page.getByLabel('Highlight color').fill('#ff0000');
+  await expect.poll(async () => (await textLayer(page)).highlight).toBe('#ff0000');
+  // The pill reaches well left of the word's own first glyph, at the box's vertical centre.
+  const t = await textLayer(page);
+  const at = async () => pixel(page, (await exported(page))[1].bytes, 540, Math.round(t.y + 8));
+  expect(await at()).toEqual([255, 0, 0]);
+  await page.getByRole('button', { name: 'Layer down', exact: true }).click();
+  await expect.poll(async () => (await saved(page)).workspace.scrapbook.order[0]).toBe(t.id);
+  await expect(page.getByRole('button', { name: 'Layer down', exact: true })).toBeDisabled();
+  expect(await at()).not.toEqual([255, 0, 0]);
+  await page.getByRole('button', { name: 'Layer up', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Layer up', exact: true })).toBeDisabled();
+  expect(await at()).toEqual([255, 0, 0]);
+  // Text buttons stack the same way, so the frontmost layer takes the pointer.
+  const undoDown = async () => {
+    await page.getByRole('button', { name: 'Layer down', exact: true }).click();
+    await expect.poll(async () => (await saved(page)).workspace.scrapbook.order[0]).toBe(t.id);
+  };
+  await undoDown();
+  const z = (selector: string) =>
+    page.locator(selector).evaluate((el) => +getComputedStyle(el).zIndex);
+  expect(await z('.text-hit')).toBeLessThan(await z('.photo-hit'));
+  // Bento keeps text above its grid, whatever the Scrapbook order.
+  await page.getByRole('button', { name: /Bento/ }).click();
+  await expect(page.locator('.text-hit')).toHaveCount(1);
+  expect(await z('.text-hit')).toBeGreaterThan(await z('.photo-hit'));
+  expect(await pixel(page, (await exported(page))[1].bytes, 540, Math.round(t.y + 8))).toEqual([
+    255, 0, 0,
+  ]);
+});
+test('a font that cannot load fails visibly in the panel, the preview and export', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await addText(page);
+  await page.route('**/fonts/anton-*', (route) => route.abort());
+  await page.getByLabel('Font', { exact: true }).selectOption('Anton');
+  await expect(page.getByRole('alert')).toContainText('The font Anton could not load');
+  await expect(page.getByLabel('Font', { exact: true })).toHaveValue('DM Sans');
+  expect((await textLayer(page)).fontFamily).toBe('DM Sans');
+  await page.unroute('**/fonts/anton-*');
+  await page.reload();
+  await expect(page.locator('.text-hit')).toHaveCount(1);
+  await page.locator('.text-hit').click();
+  await page.getByLabel('Font', { exact: true }).selectOption('Anton');
+  await expect.poll(async () => (await textLayer(page)).fontFamily).toBe('Anton');
+  await page.route('**/fonts/anton-*', (route) => route.abort());
+  await page.reload();
+  await expect(page.getByRole('alert')).toContainText('The font Anton could not load');
+  await page.getByRole('button', { name: 'Dismiss error' }).click();
+  await page.getByRole('button', { name: /Download images/ }).click();
+  await expect(page.getByRole('alert')).toContainText('The font Anton could not load');
+});
+// Holds document.fonts.load for these families until release(family), on every load of the page.
+async function holdFonts(page: Page, families: string[]) {
+  await page.addInitScript((families) => {
+    const load = document.fonts.load.bind(document.fonts);
+    const held: Record<string, () => void> = {};
+    Object.assign(window, { heldFonts: held });
+    document.fonts.load = (font, text) => {
+      const family = families.find((f) => font.includes(`"${f}"`));
+      if (!family) return load(font, text);
+      return new Promise((resolve) => {
+        const previous = held[family];
+        held[family] = () => {
+          previous?.();
+          resolve(load(font, text));
+        };
+      });
+    };
+  }, families);
+}
+type Held = { heldFonts: Record<string, () => void> };
+const heldFont = (page: Page, family: string) =>
+  page.waitForFunction((family) => !!(window as unknown as Held).heldFonts[family], family);
+const releaseFont = (page: Page, family: string) =>
+  page.evaluate((family) => (window as unknown as Held).heldFonts[family](), family);
+// Edits the stored text from a blank same-origin page, where no editor can overwrite it, then opens the editor.
+async function reopenWithText(page: Page, patch: Record<string, unknown>) {
+  await saved(page);
+  await page.route('**/blank', (route) => route.fulfill({ contentType: 'text/html', body: '' }));
+  await page.goto('/blank');
+  await page.evaluate(async (patch) => {
+    const path = '/src/lib/editor/storage.ts';
+    const storage: typeof import('../apps/web/src/lib/editor/storage') = await import(path);
+    const project = (await storage.loadProject())!;
+    project.workspace.overlays = [{ ...project.workspace.overlays[0], ...patch }];
+    await storage.saveProject(project);
+  }, patch);
+  await page.goto('/');
+  await expect(page.locator('.text-hit')).toHaveCount(1);
+}
+// Retyping once fonts are ready measures with the real font, independently of the correction.
+async function realHeight(page: Page) {
+  await page.locator('.text-hit').click();
+  const field = page.getByLabel('Text', { exact: true });
+  const value = await field.inputValue();
+  await field.fill(`${value}!`);
+  await expect.poll(async () => (await textLayer(page)).text).toBe(`${value}!`);
+  await field.fill(value);
+  await expect.poll(async () => (await textLayer(page)).text).toBe(value);
+  return (await textLayer(page)).height;
+}
+const LONG_TEXT = 'MMMM MMMM MMMM MMMM MMMM MMMM MMMM MMMM MMMM MMMM';
+test('a font choice overtaken by a newer choice, undo or deselection never lands', async ({
+  page,
+}) => {
+  await holdFonts(page, [
+    'Anton',
+    'Caveat',
+    'Playfair Display',
+    'Space Grotesk',
+    'Instrument Serif',
+  ]);
+  await page.goto('/');
+  await addText(page);
+  const font = page.getByLabel('Font', { exact: true });
+  await font.selectOption('Anton');
+  await heldFont(page, 'Anton');
+  await font.selectOption('Caveat');
+  await heldFont(page, 'Caveat');
+  await releaseFont(page, 'Caveat');
+  await expect.poll(async () => (await textLayer(page)).fontFamily).toBe('Caveat');
+  // The older choice finishing last changes nothing.
+  await releaseFont(page, 'Anton');
+  await page.waitForTimeout(100);
+  expect((await textLayer(page)).fontFamily).toBe('Caveat');
+  await expect(font).toHaveValue('Caveat');
+  // Undo while a face loads wins: no surprise commit, and redo survives.
+  await font.selectOption('Playfair Display');
+  await heldFont(page, 'Playfair Display');
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expect(font).toHaveValue('DM Sans');
+  await releaseFont(page, 'Playfair Display');
+  await page.waitForTimeout(100);
+  await expect(font).toHaveValue('DM Sans');
+  expect((await textLayer(page)).fontFamily).toBe('DM Sans');
+  const redo = page.getByRole('button', { name: 'Redo', exact: true });
+  await expect(redo).toBeEnabled();
+  await redo.click();
+  await expect(font).toHaveValue('Caveat');
+  // So does clearing the selection.
+  await font.selectOption('Space Grotesk');
+  await heldFont(page, 'Space Grotesk');
+  await page
+    .getByRole('group', { name: 'Interactive collage canvas' })
+    .click({ position: { x: 5, y: 5 } });
+  await expect(page.getByLabel('Font', { exact: true })).toHaveCount(0);
+  await releaseFont(page, 'Space Grotesk');
+  await page.waitForTimeout(100);
+  expect((await textLayer(page)).fontFamily).toBe('Caveat');
+  // An edit to something else during the load merges with it, and both land.
+  await page.locator('.text-hit').click();
+  await font.selectOption('Instrument Serif');
+  await heldFont(page, 'Instrument Serif');
+  await page.getByRole('button', { name: 'left', exact: true }).click();
+  await expect.poll(async () => (await textLayer(page)).align).toBe('left');
+  await releaseFont(page, 'Instrument Serif');
+  await expect.poll(async () => (await textLayer(page)).fontFamily).toBe('Instrument Serif');
+  expect((await textLayer(page)).align).toBe('left');
+});
+test('a ratio change on a cold font keeps real-font heights and exports the neighbouring slide', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.goto('/');
+  await addText(page);
+  await page.getByLabel('Text', { exact: true }).fill(LONG_TEXT);
+  await page.getByLabel('Font', { exact: true }).selectOption('Anton');
+  await expect.poll(async () => (await textLayer(page)).fontFamily).toBe('Anton');
+  // At -90° height grows rightwards: one stored line leaves the text short of slide 2 by culling's reach; the real height crosses the seam.
+  await holdFonts(page, ['Anton']);
+  await reopenWithText(page, { rotation: -90, size: 72, width: 240, height: 90, x: 640, y: 600 });
+  await heldFont(page, 'Anton');
+  await page.getByRole('button', { name: /^1:1/ }).click();
+  // Nothing measured the fallback font: 90px is just scaled by 1080/1350.
+  await expect.poll(async () => (await textLayer(page)).height).toBeCloseTo(72);
+  const pending = exported(page);
+  await page.waitForTimeout(100);
+  await releaseFont(page, 'Anton');
+  const [, second] = await pending;
+  await expect.poll(async () => (await textLayer(page)).height).toBeGreaterThan(72 * 4);
+  expect(await realHeight(page)).toBeCloseTo((await textLayer(page)).height);
+  expect((await inkRows(page, second.bytes, 0, 40, CREAM)).length).toBeGreaterThan(0);
+});
+test('typing and a width drag on a cold font settle to the real-font height outside history', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.goto('/');
+  await addText(page);
+  await page.getByLabel('Font', { exact: true }).selectOption('Anton');
+  await expect.poll(async () => (await textLayer(page)).fontFamily).toBe('Anton');
+  await saved(page);
+  await holdFonts(page, ['Anton']);
+  await page.reload();
+  await expect(page.locator('.text-hit')).toHaveCount(1);
+  await heldFont(page, 'Anton');
+  const start = await textLayer(page);
+  await page.locator('.text-hit').click();
+  await page.getByLabel('Text', { exact: true }).fill(LONG_TEXT);
+  await expect.poll(async () => (await textLayer(page)).text).toBe(LONG_TEXT);
+  await page.locator('.text-hit').click();
+  await drag(page, '[aria-label="Resize text width e"]', -60, 0);
+  await expect.poll(async () => (await textLayer(page)).width).toBeLessThan(start.width);
+  const narrow = await textLayer(page);
+  expect(narrow.height).toBe(start.height);
+  await releaseFont(page, 'Anton');
+  await expect.poll(async () => (await textLayer(page)).height).toBeGreaterThan(start.height);
+  // The correction took no history step: one undo goes straight back past the width drag.
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expect.poll(async () => (await textLayer(page)).width).toBe(start.width);
+  await page.getByRole('button', { name: 'Redo', exact: true }).click();
+  await expect.poll(async () => (await textLayer(page)).width).toBe(narrow.width);
+  const fixed = await textLayer(page);
+  expect(await realHeight(page)).toBeCloseTo(fixed.height);
+});
+test('a mouse double-click on a photo enters crop mode', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await upload(page, 3);
+  const crop = page.getByRole('button', { name: /Crop photo|Done cropping/ });
+  const photo = page.locator('.photo-hit').first();
+  const box = (await photo.boundingBox())!;
+  await page.mouse.dblclick(box.x + box.width / 2, box.y + box.height / 2);
+  await expect(crop).toHaveAttribute('aria-pressed', 'true');
+  await expect(photo).toHaveAttribute('aria-pressed', 'true');
+});
+test('the text panel fits a phone and opens without moving the canvas', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/');
+  await addText(page);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  const panel = (await page.getByRole('region', { name: 'Edit text' }).boundingBox())!;
+  const canvas = (await page
+    .getByRole('group', { name: 'Interactive collage canvas' })
+    .boundingBox())!;
+  expect(panel.y).toBeGreaterThan(canvas.y + canvas.height);
 });

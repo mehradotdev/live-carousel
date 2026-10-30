@@ -28,12 +28,16 @@ SOFTWARE.
 
 ```
 
-DM Sans and Instrument Serif fonts, self-hosted in apps/web/static/fonts (WOFF2 subsets served by Google Fonts).
-Sources: https://github.com/googlefonts/dm-fonts and https://github.com/Instrument/instrument-serif
+DM Sans, Instrument Serif, Playfair Display, Space Grotesk, Caveat and Anton fonts, self-hosted in apps/web/static/fonts (WOFF2 subsets served by Google Fonts).
+Sources: https://github.com/googlefonts/dm-fonts, https://github.com/Instrument/instrument-serif, https://github.com/clauseggers/Playfair-Display, https://github.com/floriankarsten/space-grotesk, https://github.com/googlefonts/caveat and https://github.com/googlefonts/AntonFont
 
 ```text
 Copyright 2014 The DM Sans Project Authors (https://github.com/googlefonts/dm-fonts)
 Copyright 2022 The Instrument Serif Project Authors (https://github.com/Instrument/instrument-serif)
+Copyright 2017 The Playfair Display Project Authors (https://github.com/clauseggers/Playfair-Display), with Reserved Font Name "Playfair Display"
+Copyright 2020 The Space Grotesk Project Authors (https://github.com/floriankarsten/space-grotesk)
+Copyright 2014 The Caveat Project Authors (https://github.com/googlefonts/caveat)
+Copyright 2020 The Anton Project Authors (https://github.com/googlefonts/AntonFont.git)
 
 This Font Software is licensed under the SIL Open Font License, Version 1.1.
 This license is copied below, and is also available with a FAQ at:

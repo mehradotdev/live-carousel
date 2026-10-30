@@ -19,6 +19,28 @@ export const BENTO_PER_SLIDE = 6;
 // Scrapbook layers always keep this much of their rotated bounds on the canvas.
 export const GRAB = 48;
 export const MAX_PHOTOS = 100;
+export const MAX_TEXT = 2000;
+export const TEXT_SIZE = { min: 12, max: 400 } as const;
+export const TEXT_MIN_WIDTH = 80;
+export const TEXT_ALIGNS = ['left', 'center', 'right'] as const;
+export const TEXT_COLORS = [
+  ['Ink', '#1c1a17'],
+  ['White', '#ffffff'],
+  ['Cream', '#f3eee4'],
+  ['Coral', '#e4572e'],
+  ['Moss', '#55702f'],
+  ['Sky', '#2f6f9f'],
+] as const;
+export const DEFAULT_HIGHLIGHT = '#ffe27a';
+// Faces in static/fonts. A toggle a font has no face for stays off, so the browser never synthesises one.
+export const FONTS = [
+  { family: 'Instrument Serif', kind: 'serif', bold: false, italic: true },
+  { family: 'Playfair Display', kind: 'serif', bold: true, italic: true },
+  { family: 'DM Sans', kind: 'sans', bold: true, italic: true },
+  { family: 'Space Grotesk', kind: 'sans', bold: true, italic: false },
+  { family: 'Caveat', kind: 'handwritten', bold: true, italic: false },
+  { family: 'Anton', kind: 'display', bold: false, italic: false },
+] as const;
 export type Style = 'bento' | 'scrapbook';
 export const TEMPLATES = ['mosaic', 'editorial', 'balanced', 'panorama'] as const;
 export type Template = (typeof TEMPLATES)[number];
@@ -30,18 +52,34 @@ export interface Asset {
   width: number; // master pixels; crops are computed in this space
   height: number;
 }
-export interface Layer {
+export interface Box {
   id: string;
-  assetId: string;
   x: number;
   y: number;
   width: number;
   height: number;
   rotation: number;
+}
+export interface Layer extends Box {
+  type: 'photo';
+  assetId: string;
   zoom: number;
   panX: number;
   panY: number;
 }
+// `height` always follows the wrapped text; see fitTextBox.
+export interface TextLayer extends Box {
+  type: 'text';
+  text: string;
+  fontFamily: string;
+  size: number;
+  color: string;
+  bold: boolean;
+  italic: boolean;
+  align: (typeof TEXT_ALIGNS)[number];
+  highlight?: string;
+}
+export type AnyLayer = Layer | TextLayer;
 export type BentoNode =
   | { layerId: string }
   | { axis: 'x' | 'y'; ratio: number; first: BentoNode; second: BentoNode };
@@ -58,7 +96,11 @@ export interface Workspace {
   seed: number;
   background: string;
   bento: BentoLayout;
-  scrapbook: { layers: Layer[] };
+  // `layers` stays photos only, since layout, resize and crop all read it that way. `order` lists photo and
+  // text ids bottom to top; anything unlisted stacks above it, so adding a photo or text needs no bookkeeping.
+  scrapbook: { layers: Layer[]; order: string[] };
+  // Text is stored once and shared by both styles. Bento floats it above the grid in this order.
+  overlays: TextLayer[];
 }
 export interface Project {
   workspace: Workspace;
@@ -90,6 +132,27 @@ function random(seed: number) {
   };
 }
 export const activeLayers = (workspace: Workspace) => workspace[workspace.style].layers;
+// All layers bottom to top, in the order they paint.
+export function stack(workspace: Workspace): AnyLayer[] {
+  const { bento, scrapbook, overlays, style } = workspace;
+  if (style === 'bento') return [...bento.layers, ...overlays];
+  const all = [...scrapbook.layers, ...overlays];
+  const ids = new Set(scrapbook.order);
+  return [
+    ...scrapbook.order.flatMap((id) => all.find((l) => l.id === id) ?? []),
+    ...all.filter((l) => !ids.has(l.id)),
+  ];
+}
+export const updateLayer = (workspace: Workspace, layer: AnyLayer): Workspace =>
+  layer.type === 'text'
+    ? {
+        ...workspace,
+        overlays: workspace.overlays.map((l) => (l.id === layer.id ? layer : l)),
+      }
+    : withLayers(
+        workspace,
+        activeLayers(workspace).map((l) => (l.id === layer.id ? layer : l)),
+      );
 export const withLayers = (workspace: Workspace, layers: Layer[]): Workspace => ({
   ...workspace,
   [workspace.style]: { ...workspace[workspace.style], layers },
@@ -270,11 +333,19 @@ function replaceLeaf(node: BentoNode, id: string, next?: BentoNode): BentoNode |
 }
 // Removes a photo from the active layout only; it stays in the library, so the tray offers it again.
 export function removeLayer(workspace: Workspace, id: string): Workspace {
+  const { scrapbook } = workspace;
+  const unlisted = { ...scrapbook, order: scrapbook.order.filter((o) => o !== id) };
+  if (workspace.overlays.some((l) => l.id === id))
+    return {
+      ...workspace,
+      scrapbook: unlisted,
+      overlays: workspace.overlays.filter((l) => l.id !== id),
+    };
   if (workspace.style === 'scrapbook')
-    return withLayers(
-      workspace,
-      workspace.scrapbook.layers.filter((l) => l.id !== id),
-    );
+    return {
+      ...workspace,
+      scrapbook: { ...unlisted, layers: scrapbook.layers.filter((l) => l.id !== id) },
+    };
   const { bento } = workspace;
   return applyBento({
     ...workspace,
@@ -285,16 +356,20 @@ export function removeAsset(workspace: Workspace, assetId: string): Workspace {
   let { tree } = workspace.bento;
   for (const l of workspace.bento.layers)
     if (l.assetId === assetId) tree = tree && replaceLeaf(tree, l.id);
+  const { scrapbook } = workspace;
+  const layers = scrapbook.layers.filter((l) => l.assetId !== assetId);
+  const gone = scrapbook.layers.filter((l) => l.assetId === assetId).map((l) => l.id);
   return applyBento({
     ...workspace,
     bento: { ...workspace.bento, tree },
-    scrapbook: { layers: workspace.scrapbook.layers.filter((l) => l.assetId !== assetId) },
+    scrapbook: { layers, order: scrapbook.order.filter((id) => !gone.includes(id)) },
   });
 }
 // Splits `target` (or the largest cell) 50/50 along its longer side; returns `workspace` itself when that would leave a cell below MIN_TILE.
 export function addToBento(workspace: Workspace, assetId: string, target?: string): Workspace {
   const { bento } = workspace;
   const layer: Layer = {
+    type: 'photo',
     id: crypto.randomUUID(),
     assetId,
     x: 0,
@@ -330,6 +405,7 @@ export function addPhotos(workspace: Workspace, assets: Asset[], target?: string
   const next = {
     ...workspace,
     scrapbook: {
+      ...scrapbook,
       layers: [...scrapbook.layers, ...placed.map((l) => ({ ...l, id: crypto.randomUUID() }))],
     },
   };
@@ -357,7 +433,7 @@ export function layout(
   style: Style,
   seed = 0,
   template: Template = TEMPLATES[seed % TEMPLATES.length],
-  base: Size & Partial<Pick<Workspace, 'background'>> & { bento?: Spacing } = {
+  base: Size & Partial<Pick<Workspace, 'background' | 'overlays'>> & { bento?: Spacing } = {
     aspect: '4:5',
     slides: 3,
   },
@@ -385,6 +461,7 @@ export function layout(
     const width = Math.min(maxW, maxH * aspect) * (0.92 + rng() * 0.15);
     const height = width / aspect;
     return {
+      type: 'photo',
       id: `layer-${i}`,
       assetId: asset.id,
       x: slide * WIDTH + (((local % cols) + 0.5) * WIDTH) / cols - width / 2 + (rng() - 0.5) * 100,
@@ -406,7 +483,8 @@ export function layout(
     seed,
     background: base.background ?? BACKGROUNDS[0][1],
     bento: { layers, template, gap, margin, radius },
-    scrapbook: { layers },
+    scrapbook: { layers, order: [] },
+    overlays: base.overlays ?? [],
   };
   if (!layers.length) return workspace;
   // Layer ids are in shuffled order; placement priority follows the incoming photo order.
@@ -435,6 +513,7 @@ export function regenerate(
 // Bento rebuilds the tree in the same layer order (crops kept, dividers reset). Scrapbook keeps
 // photo proportions: size and centre y scale by the height ratio, centre x stays (width is fixed).
 // Layers centred past a removed slide move onto the last slide. Every Scrapbook layer stays grabbable.
+// Text does the same in both styles, its font scaling with its box.
 export function resize(workspace: Workspace, aspect: Aspect, slides: number): Workspace {
   const next = { ...workspace, aspect, slides };
   const { template } = workspace.bento;
@@ -443,30 +522,35 @@ export function resize(workspace: Workspace, aspect: Aspect, slides: number): Wo
   const tree = fitBento(ids, ids, next, template, rng);
   const k = ASPECTS[aspect] / ASPECTS[workspace.aspect];
   const end = WIDTH * slides;
+  const rescale = <T extends Box>(l: T, width = l.width * k): T => {
+    const height = l.height * k;
+    const cx = l.x + l.width / 2;
+    const x =
+      cx > end
+        ? clamp(
+            end - WIDTH + (cx % WIDTH) - width / 2,
+            end - WIDTH,
+            Math.max(end - WIDTH, end - width),
+          )
+        : cx - width / 2;
+    const y = (l.y + l.height / 2) * k - height / 2;
+    return keepOnCanvas({ ...l, width, height, x, y }, end, ASPECTS[aspect]);
+  };
   return {
     ...applyBento({ ...next, bento: { ...workspace.bento, tree } }),
     scrapbook: {
-      layers: workspace.scrapbook.layers.map((l) => {
-        const width = l.width * k;
-        const height = l.height * k;
-        const cx = l.x + l.width / 2;
-        const x =
-          cx > end
-            ? clamp(
-                end - WIDTH + (cx % WIDTH) - width / 2,
-                end - WIDTH,
-                Math.max(end - WIDTH, end - width),
-              )
-            : cx - width / 2;
-        const y = (l.y + l.height / 2) * k - height / 2;
-        return keepOnCanvas({ ...l, width, height, x, y }, end, ASPECTS[aspect]);
-      }),
+      ...workspace.scrapbook,
+      layers: workspace.scrapbook.layers.map((l) => rescale(l)),
     },
+    overlays: workspace.overlays.map((l) => ({
+      ...rescale(l, Math.max(TEXT_MIN_WIDTH, l.width * k)),
+      size: clamp(l.size * k, TEXT_SIZE.min, TEXT_SIZE.max),
+    })),
   };
 }
 // Moves a layer until at least GRAB px of its rotated bounding box (or all of it, if smaller)
 // overlaps a canvas of the given size on each axis.
-export function keepOnCanvas(layer: Layer, width: number, height: number): Layer {
+export function keepOnCanvas<T extends Box>(layer: T, width: number, height: number): T {
   const angle = (layer.rotation * Math.PI) / 180;
   const cos = Math.abs(Math.cos(angle));
   const sin = Math.abs(Math.sin(angle));
@@ -497,15 +581,18 @@ export function coverCrop(
   const height = dh / scale;
   return { x: (sw - width) * clamp(px, 0, 1), y: (sh - height) * clamp(py, 0, 1), width, height };
 }
-// Layers whose rotated frame, Scrapbook border or shadow can reach slide `slide`.
+// Distance from a layer's centre that its rotated frame, Scrapbook border and shadow, or glyph overhang stay within.
+export const layerReach = (l: AnyLayer) =>
+  Math.hypot(l.width + 24, l.height + 64) / 2 + 60 + (l.type === 'text' ? l.size / 2 : 0);
+// Layers that can reach slide `slide`.
 export function slideLayers(workspace: Workspace, slide: number) {
-  return activeLayers(workspace).filter((l) => {
-    const reach = Math.hypot(l.width + 24, l.height + 64) / 2 + 60;
+  return stack(workspace).filter((l) => {
+    const reach = layerReach(l);
     const cx = l.x + l.width / 2;
     return cx + reach > slide * WIDTH && cx - reach < (slide + 1) * WIDTH;
   });
 }
-export function localPoint(layer: Layer, point: Point): Point {
+export function localPoint(layer: Box, point: Point): Point {
   const angle = (-layer.rotation * Math.PI) / 180;
   const dx = point.x - layer.x - layer.width / 2;
   const dy = point.y - layer.y - layer.height / 2;
@@ -514,8 +601,9 @@ export function localPoint(layer: Layer, point: Point): Point {
     y: dx * Math.sin(angle) + dy * Math.cos(angle),
   };
 }
-export function hitLayer(workspace: Workspace, point: Point): Layer | undefined {
-  return [...activeLayers(workspace)].reverse().find((l) => {
+// The topmost of `layers` (bottom to top) under `point`.
+export function hitLayer<T extends Box>(layers: T[], point: Point): T | undefined {
+  return [...layers].reverse().find((l) => {
     const p = localPoint(l, point);
     return Math.abs(p.x) <= l.width / 2 && Math.abs(p.y) <= l.height / 2;
   });
@@ -577,12 +665,14 @@ export function resizeLayer(
     y: anchor.y + ((sx * width) / 2) * ux.y + ((sy * height) / 2) * uy.y - height / 2,
   };
 }
+// Scrapbook moves a layer through the shared stack. Bento's grid has no z-order, so only floating text moves.
 export function reorderLayer(
   workspace: Workspace,
   id: string,
   direction: 'front' | 'back' | 'forward' | 'backward',
 ): Workspace {
-  const layers = [...activeLayers(workspace)];
+  const bento = workspace.style === 'bento';
+  const layers: AnyLayer[] = bento ? [...workspace.overlays] : stack(workspace);
   const i = layers.findIndex((l) => l.id === id);
   if (i < 0) return workspace;
   const j =
@@ -591,7 +681,107 @@ export function reorderLayer(
       : direction === 'back'
         ? 0
         : clamp(i + (direction === 'forward' ? 1 : -1), 0, layers.length - 1);
+  if (i === j) return workspace;
   const [layer] = layers.splice(i, 1);
   layers.splice(j, 0, layer);
-  return withLayers(workspace, layers);
+  if (bento) return { ...workspace, overlays: layers as TextLayer[] };
+  return {
+    ...workspace,
+    scrapbook: {
+      layers: layers.filter((l) => l.type === 'photo'),
+      order: layers.map((l) => l.id),
+    },
+  };
 }
+export const fontOf = ({ fontFamily, bold, italic, size }: TextLayer) => {
+  const face = FONTS.find((f) => f.family === fontFamily);
+  const b = bold && (face?.bold ?? true);
+  const i = italic && (face?.italic ?? true);
+  return `${i ? 'italic' : 'normal'} ${b ? 700 : 400} ${size}px "${fontFamily}"`;
+};
+const LINE_HEIGHT = 1.25;
+export const lineHeight = (l: TextLayer) => l.size * LINE_HEIGHT;
+// Text sits this far inside the box on both sides, so turning the highlight pill on never rewraps it.
+export const textPad = (l: TextLayer) => l.size * 0.3;
+// Greedy word wrap; a word wider than `width` breaks between graphemes, so a line always takes at least one.
+export function wrapText(text: string, width: number, measure: (s: string) => number) {
+  const graphemes = new Intl.Segmenter();
+  const lines: string[] = [];
+  for (const paragraph of text.split('\n')) {
+    let line = '';
+    for (const word of paragraph.split(' ')) {
+      const joined = line ? `${line} ${word}` : word;
+      if (measure(joined) <= width) {
+        line = joined;
+        continue;
+      }
+      if (line) lines.push(line);
+      line = '';
+      if (measure(word) <= width) {
+        line = word;
+        continue;
+      }
+      for (const { segment } of graphemes.segment(word)) {
+        if (line && measure(line + segment) > width) {
+          lines.push(line);
+          line = '';
+        }
+        line += segment;
+      }
+    }
+    lines.push(line);
+  }
+  return lines;
+}
+export const textLines = (l: TextLayer, measure: (s: string) => number) =>
+  wrapText(l.text, Math.max(1, l.width - 2 * textPad(l)), measure);
+// Height follows the text, growing downwards along the layer's own rotated axis so its top edge stays put.
+export function fitTextBox(l: TextLayer, measure: (s: string) => number): TextLayer {
+  const height = textLines(l, measure).length * lineHeight(l);
+  const angle = (l.rotation * Math.PI) / 180;
+  const grow = (height - l.height) / 2;
+  return {
+    ...l,
+    height,
+    x: l.x - grow * Math.sin(angle),
+    y: l.y - grow + grow * Math.cos(angle),
+  };
+}
+// Drags one side along the layer's own axis, keeping the opposite side fixed; the caller refits the height.
+export function resizeTextWidth(l: TextLayer, pointer: Point, side: string, max: number) {
+  const sign = side === 'e' ? 1 : -1;
+  const angle = (l.rotation * Math.PI) / 180;
+  const ux = { x: Math.cos(angle), y: Math.sin(angle) };
+  const cx = l.x + l.width / 2;
+  const cy = l.y + l.height / 2;
+  const anchor = { x: cx - ((sign * l.width) / 2) * ux.x, y: cy - ((sign * l.width) / 2) * ux.y };
+  const reach = sign * ((pointer.x - anchor.x) * ux.x + (pointer.y - anchor.y) * ux.y);
+  const width = clamp(reach, TEXT_MIN_WIDTH, max);
+  return {
+    ...l,
+    width,
+    x: anchor.x + ((sign * width) / 2) * ux.x - width / 2,
+    y: anchor.y + ((sign * width) / 2) * ux.y - l.height / 2,
+  };
+}
+// Fixed values, not theme tokens: text colors and fonts are project data.
+export const newText = (slide: number, slideHeight: number): TextLayer => {
+  const width = 720;
+  const size = 72;
+  return {
+    type: 'text',
+    id: crypto.randomUUID(),
+    text: 'Your text',
+    fontFamily: 'DM Sans',
+    size,
+    color: TEXT_COLORS[0][1],
+    bold: false,
+    italic: false,
+    align: 'center',
+    x: slide * WIDTH + (WIDTH - width) / 2,
+    y: (slideHeight - size * LINE_HEIGHT) / 2,
+    width,
+    height: size * LINE_HEIGHT,
+    rotation: 0,
+  };
+};

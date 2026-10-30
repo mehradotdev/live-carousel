@@ -2,11 +2,19 @@ import { zipSync } from 'fflate';
 import {
   activeLayers,
   coverCrop,
+  fitTextBox,
+  fontOf,
+  lineHeight,
   slideLayers,
   slideSize,
+  stack,
+  textLines,
+  textPad,
+  type AnyLayer,
   type Asset,
   type Layer,
   type Project,
+  type TextLayer,
   type Workspace,
 } from './model';
 import { fit, PREVIEW } from './storage';
@@ -85,6 +93,82 @@ function paintLayer(
   );
   ctx.restore();
 }
+const fontKey = (l: TextLayer) => fontOf({ ...l, size: 16 });
+const fonts = new Map<string, Promise<void>>();
+const loaded = new Set<string>();
+const fontError = (l: TextLayer) =>
+  `The font ${l.fontFamily} could not load, so text using it cannot be shown or exported. Reload the page and try again.`;
+export const fontReady = (l: TextLayer) => loaded.has(fontKey(l));
+// A canvas silently draws fallback text until a face has loaded, so everything that paints text goes through here.
+// shortcut: failures are cached, as a failed FontFace stays failed until the page reloads.
+export function loadFonts(layers: TextLayer[]) {
+  return Promise.all(
+    layers.map((l) => {
+      const key = fontKey(l);
+      let font = fonts.get(key);
+      if (!font) {
+        // The sample touches both bundled unicode-range subsets; without it only the Latin one would load.
+        font = document.fonts.load(key, 'AĀ').then(
+          (faces) => {
+            if (!faces.length) throw new Error(fontError(l));
+            loaded.add(key);
+          },
+          () => {
+            throw new Error(fontError(l));
+          },
+        );
+        fonts.set(key, font);
+      }
+      return font;
+    }),
+  );
+}
+const measurer = () => {
+  const ctx = document.createElement('canvas').getContext('2d');
+  if (!ctx) throw new Error('Canvas is unavailable.');
+  return ctx;
+};
+let measuring: CanvasRenderingContext2D | undefined;
+// Refits a text box's height. A cold font would measure fallback text, so the box keeps its height until
+// the page's correction after the font loads, or the refit before export.
+export function fitText(l: TextLayer) {
+  if (!fontReady(l)) return l;
+  const ctx = (measuring ??= measurer());
+  ctx.font = fontOf(l);
+  return fitTextBox(l, (s) => ctx.measureText(s).width);
+}
+export const fitTexts = (workspace: Workspace): Workspace => ({
+  ...workspace,
+  overlays: workspace.overlays.map(fitText),
+});
+function paintText(ctx: CanvasRenderingContext2D, l: TextLayer) {
+  ctx.save();
+  ctx.translate(l.x + l.width / 2, l.y + l.height / 2);
+  ctx.rotate((l.rotation * Math.PI) / 180);
+  ctx.font = fontOf(l);
+  ctx.textAlign = l.align;
+  ctx.textBaseline = 'middle';
+  const pad = textPad(l);
+  const height = lineHeight(l);
+  const x = { left: -l.width / 2 + pad, center: 0, right: l.width / 2 - pad }[l.align];
+  const lines = textLines(l, (s) => ctx.measureText(s).width);
+  const y = (i: number) => -l.height / 2 + height * (i + 0.5);
+  // Pills first, so one line's pill never covers the descenders of the line above.
+  if (l.highlight) {
+    ctx.fillStyle = l.highlight;
+    lines.forEach((line, i) => {
+      if (!line) return;
+      const width = ctx.measureText(line).width;
+      const left = { left: x, center: x - width / 2, right: x - width }[l.align];
+      ctx.beginPath();
+      ctx.roundRect(left - pad, y(i) - height / 2, width + 2 * pad, height, l.size * 0.2);
+      ctx.fill();
+    });
+  }
+  ctx.fillStyle = l.color;
+  lines.forEach((line, i) => ctx.fillText(line, x, y(i)));
+  ctx.restore();
+}
 // Editor view onto an already-sized canvas, in device px; layers off the canvas are skipped.
 export function paint(
   { workspace, assets }: Project,
@@ -106,7 +190,11 @@ export function paint(
   ctx.beginPath();
   ctx.rect(0, 0, width * workspace.slides, height);
   ctx.clip();
-  for (const layer of activeLayers(workspace)) {
+  for (const layer of stack(workspace)) {
+    if (layer.type === 'text') {
+      if (fontReady(layer) && reaches(layer, visible)) paintText(ctx, layer);
+      continue;
+    }
     const image = images.get(layer.assetId);
     const asset = assets.find((a) => a.id === layer.assetId);
     // A closed bitmap (replaced by a sharper decode) has zero size.
@@ -121,10 +209,15 @@ export async function draw(
   canvas: HTMLCanvasElement,
   scale = 1,
   slide?: number,
-  layers = activeLayers(workspace),
+  layers: AnyLayer[] = stack(workspace),
 ) {
+  await loadFonts(layers.filter((l) => l.type === 'text'));
   const ctx = begin(workspace, canvas, scale, slide);
   for (const layer of layers) {
+    if (layer.type === 'text') {
+      paintText(ctx, layer);
+      continue;
+    }
     const asset = assets.find((a) => a.id === layer.assetId);
     if (!asset) throw new Error('A photo referenced by the collage is missing.');
     const image = await createImageBitmap(asset.masterBlob);
@@ -238,8 +331,11 @@ export async function exportSlides(project: Project, format: 'png' | 'jpeg') {
   const files: File[] = [];
   const canvas = document.createElement('canvas');
   try {
-    for (let i = 0; i < project.workspace.slides; i++) {
-      await draw(project, canvas, 1, i, slideLayers(project.workspace, i));
+    // Slide culling trusts each height, which is stale while a font is still loading.
+    await loadFonts(project.workspace.overlays);
+    const workspace = fitTexts(project.workspace);
+    for (let i = 0; i < workspace.slides; i++) {
+      await draw({ ...project, workspace }, canvas, 1, i, slideLayers(workspace, i));
       const number = String(i + 1).padStart(2, '0');
       const name = `living-carousel-${number}.${format === 'jpeg' ? 'jpg' : 'png'}`;
       files.push(

@@ -1,4 +1,4 @@
-import { WIDTH, clamp, type Layer, type Point } from './model';
+import { WIDTH, clamp, layerReach, type AnyLayer, type Point } from './model';
 // Screen = world × scale + (x, y), in CSS px relative to the viewport's top-left.
 export type View = { x: number; y: number; scale: number };
 export type Size = { width: number; height: number };
@@ -68,9 +68,8 @@ export const visibleRect = (view: View, viewport: Size): Rect => ({
 });
 export const centredSlide = (view: View, viewport: Size, slides: number) =>
   clamp(Math.floor((viewport.width / 2 - view.x) / view.scale / WIDTH), 0, slides - 1);
-// Conservative: a rotated layer plus the Scrapbook frame and shadow stays within this circle.
-export function reaches(l: Layer, rect: Rect) {
-  const r = Math.hypot(l.width, l.height) / 2 + 60;
+export function reaches(l: AnyLayer, rect: Rect) {
+  const r = layerReach(l);
   const cx = l.x + l.width / 2;
   const cy = l.y + l.height / 2;
   return (

@@ -25,6 +25,14 @@ import {
   removeAsset,
   removeLayer,
   setSpacing,
+  newText,
+  stack,
+  fitTextBox,
+  resizeTextWidth,
+  textLines,
+  updateLayer,
+  wrapText,
+  TEXT_MIN_WIDTH,
   type Asset,
   type BentoNode,
   type Workspace,
@@ -157,14 +165,15 @@ it('swaps image content and crops while preserving cells; stacking affects hit t
     ...w,
     style: 'scrapbook' as const,
     scrapbook: {
+      order: [],
       layers: [
         { ...a, x: 100, y: 100, width: 400, height: 400, rotation: 0 },
         { ...b, x: 100, y: 100, width: 400, height: 400, rotation: 45 },
       ],
     },
   };
-  expect(hitLayer(scrap, { x: 300, y: 300 })?.id).toBe(b.id);
-  expect(hitLayer(reorderLayer(scrap, b.id, 'back'), { x: 300, y: 300 })?.id).toBe(a.id);
+  expect(hitLayer(stack(scrap), { x: 300, y: 300 })?.id).toBe(b.id);
+  expect(hitLayer(stack(reorderLayer(scrap, b.id, 'back')), { x: 300, y: 300 })?.id).toBe(a.id);
 });
 describe('aspect and slide-count changes', () => {
   const center = (l: { x: number; y: number; width: number; height: number }) => ({
@@ -443,6 +452,7 @@ describe('Bento editing', () => {
     const moved: Workspace = {
       ...w,
       scrapbook: {
+        order: [],
         layers: w.scrapbook.layers.map((l, i) => (i ? l : { ...l, x: 777, y: 55 })),
       },
     };
@@ -480,5 +490,136 @@ describe('Bento editing', () => {
       (w.scrapbook.layers[0].height * 1920) / 1350,
     );
     expect(Math.max(...next.bento.layers.map((l) => l.y + l.height))).toBeCloseTo(1920 - 24);
+  });
+});
+describe('text layers', () => {
+  const chars = (s: string) => s.length * 10;
+  const withText = (style: 'bento' | 'scrapbook', ...ids: string[]) => {
+    const w = layout(assets.slice(0, 2), style);
+    return { ...w, overlays: ids.map((id) => ({ ...newText(0, 1350), id })) };
+  };
+  const ids = (w: Workspace) => stack(w).map((l) => l.id);
+  it('wraps on words, keeps explicit and empty lines, and breaks only words wider than the box', () => {
+    expect(wrapText('aa bb cc', 50, chars)).toEqual(['aa bb', 'cc']);
+    expect(wrapText('aa\n\nbb', 50, chars)).toEqual(['aa', '', 'bb']);
+    expect(wrapText('', 50, chars)).toEqual(['']);
+    expect(wrapText('abcdefgh ij', 30, chars)).toEqual(['abc', 'def', 'gh', 'ij']);
+    // Never loops or drops text when not even one character fits.
+    expect(wrapText('abc', 1, chars)).toEqual(['a', 'b', 'c']);
+    // Emoji sequences stay whole.
+    expect(wrapText('👩‍🚀👩‍🚀', 1, chars)).toEqual(['👩‍🚀', '👩‍🚀']);
+  });
+  it('wraps inside the padding and fits the height to the lines, keeping the rotated top edge', () => {
+    const l = { ...newText(0, 1350), text: 'aa bb cc', size: 100, width: 110, rotation: 90 };
+    // 110 wide less 30 padding each side leaves 50: 'aa bb' is exactly 50, but size 100 pads 30.
+    expect(textLines(l, chars)).toEqual(['aa bb', 'cc']);
+    const top = (b: typeof l) => ({
+      // The centre of the top edge; at 90° the layer's "up" points to +x.
+      x: b.x + b.width / 2 + b.height / 2,
+      y: b.y + b.height / 2,
+    });
+    const before = { ...l, height: 125 };
+    const fitted = fitTextBox(before, chars);
+    expect(fitted.height).toBe(2 * 125);
+    expect(top(fitted).x).toBeCloseTo(top(before).x);
+    expect(top(fitted).y).toBeCloseTo(top(before).y);
+  });
+  it('changing width keeps the opposite side fixed on a rotated box and respects the limits', () => {
+    const l = { ...newText(0, 1350), x: 100, y: 100, width: 400, height: 90, rotation: 90 };
+    // At 90° the east side faces down, so its handle follows y.
+    // The west side sits at y = 145 - 200 = -55, so a pointer at y = 445 means a width of 500.
+    const e = resizeTextWidth(l, { x: 0, y: 445 }, 'e', 3240);
+    expect(e.width).toBeCloseTo(500);
+    const left = (b: typeof l) => b.y + b.height / 2 - b.width / 2;
+    expect(left(e)).toBeCloseTo(left(l));
+    expect(resizeTextWidth(l, { x: 0, y: -999 }, 'e', 3240).width).toBe(TEXT_MIN_WIDTH);
+    expect(resizeTextWidth(l, { x: 0, y: 9999 }, 'e', 500).width).toBe(500);
+  });
+  it('hit-tests rotated text in its own frame, above photos', () => {
+    const w = withText('scrapbook', 't');
+    const [photo] = w.scrapbook.layers;
+    const text = { ...w.overlays[0], x: 100, y: 500, width: 400, height: 100, rotation: 90 };
+    const scene: Workspace = {
+      ...w,
+      overlays: [text],
+      scrapbook: {
+        order: [],
+        layers: [{ ...photo, x: 100, y: 100, width: 400, height: 800, rotation: 0 }],
+      },
+    };
+    // The box is now 100 wide and 400 tall around (300, 550).
+    expect(hitLayer(stack(scene), { x: 300, y: 720 })?.id).toBe('t');
+    expect(hitLayer([text], { x: 120, y: 550 })).toBeUndefined();
+    expect(hitLayer(stack(scene), { x: 120, y: 550 })?.id).toBe(photo.id);
+    // A Bento drop only ever looks at photos.
+    expect(hitLayer(activeLayers(scene), { x: 300, y: 720 })?.id).toBe(photo.id);
+  });
+  it('Bento floats text above the grid and reorders only among text', () => {
+    const w = withText('bento', 't1', 't2');
+    const photos = w.bento.layers.map((l) => l.id);
+    expect(ids(w)).toEqual([...photos, 't1', 't2']);
+    const up = reorderLayer(w, 't1', 'forward');
+    expect(ids(up)).toEqual([...photos, 't2', 't1']);
+    expect(reorderLayer(up, 't1', 'forward')).toBe(up);
+    expect(reorderLayer(w, photos[0], 'forward')).toBe(w);
+    // Scrapbook's stack is untouched by Bento's floating order.
+    expect(up.scrapbook).toEqual(w.scrapbook);
+  });
+  it('Scrapbook shares one stack: text moves between photos and Bento keeps its own order', () => {
+    const w = withText('scrapbook', 't1', 't2');
+    const [a, b] = w.scrapbook.layers.map((l) => l.id);
+    expect(ids(w)).toEqual([a, b, 't1', 't2']);
+    const down = reorderLayer(w, 't1', 'backward');
+    expect(ids(down)).toEqual([a, 't1', b, 't2']);
+    expect(ids(reorderLayer(down, a, 'forward'))).toEqual(['t1', a, b, 't2']);
+    expect(down.scrapbook.layers.map((l) => l.id)).toEqual([a, b]);
+    expect(ids({ ...down, style: 'bento' }).slice(-2)).toEqual(['t1', 't2']);
+    // New layers stack on top without touching the order.
+    const added = { ...down, overlays: [...down.overlays, { ...down.overlays[0], id: 't3' }] };
+    expect(ids(added)).toEqual([a, 't1', b, 't2', 't3']);
+    // Deleting takes the id out of the order, in the same step.
+    const gone = removeLayer(down, 't1');
+    expect(gone.scrapbook.order).toEqual([a, b, 't2']);
+    expect(gone.overlays.map((l) => l.id)).toEqual(['t2']);
+    const noPhoto = removeLayer(down, a);
+    expect(noPhoto.scrapbook.order).toEqual(['t1', b, 't2']);
+    const noAsset = removeAsset(down, w.scrapbook.layers[1].assetId);
+    expect(noAsset.scrapbook.order).toEqual([a, 't1', 't2']);
+  });
+  it('removing a Bento cell leaves the Scrapbook order of a photo sharing its id alone', () => {
+    const w = reorderLayer(withText('scrapbook', 't'), 't', 'back');
+    const bento: Workspace = { ...w, style: 'bento' };
+    const id = bento.bento.layers[0].id;
+    expect(w.scrapbook.order).toContain(id);
+    expect(removeLayer(bento, id).scrapbook.order).toEqual(w.scrapbook.order);
+  });
+  it('is shared across style switches, shuffles and photo changes', () => {
+    const w = withText('bento', 't');
+    expect({ ...w, style: 'scrapbook' as const }.overlays).toEqual(w.overlays);
+    expect(regenerate(w, assets, 3).overlays).toEqual(w.overlays);
+    expect(regenerate({ ...w, style: 'scrapbook' }, assets, 3).overlays).toEqual(w.overlays);
+    expect(addPhotos(w, [{ id: 'new' } as Asset]).overlays).toEqual(w.overlays);
+    const moved = updateLayer(w, { ...w.overlays[0], x: 5 });
+    expect(moved.overlays[0].x).toBe(5);
+    expect(moved.bento).toEqual(w.bento);
+  });
+  it('scales with the format like Scrapbook, in both styles, and moves off removed slides', () => {
+    for (const style of ['bento', 'scrapbook'] as const) {
+      const w = withText(style, 't');
+      const l = { ...w.overlays[0], x: 2400, width: 500, height: 90, size: 72 };
+      const next = resize({ ...w, overlays: [l] }, '9:16', 1).overlays[0];
+      const k = 1920 / 1350;
+      expect(next.width).toBeCloseTo(500 * k);
+      expect(next.height).toBeCloseTo(90 * k);
+      expect(next.size).toBeCloseTo(72 * k);
+      expect(next.x).toBeLessThan(1080);
+      const small = resize(
+        { ...w, aspect: '9:16', overlays: [{ ...l, size: 12, width: 80 }] },
+        '1:1',
+        3,
+      );
+      expect(small.overlays[0].size).toBe(12);
+      expect(small.overlays[0].width).toBe(80);
+    }
   });
 });

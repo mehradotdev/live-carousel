@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { resolve } from '$app/paths';
   import {
     activeLayers,
@@ -8,11 +8,21 @@
     layout,
     regenerate,
     removeAsset,
+    removeLayer,
+    reorderLayer,
     setSpacing,
+    stack,
+    updateLayer,
     withLayers,
     BACKGROUNDS,
+    DEFAULT_HIGHLIGHT,
+    FONTS,
+    MAX_TEXT,
     SPACING_MAX,
     TEMPLATES,
+    TEXT_ALIGNS,
+    TEXT_COLORS,
+    TEXT_SIZE,
     clamp,
     type Template,
     WIDTH,
@@ -27,8 +37,17 @@
     type Project,
     type Spacing,
     type Style,
+    type TextLayer,
   } from '#lib/editor/model.ts';
-  import { exportSlides, download, backup, zip } from '#lib/editor/render.ts';
+  import {
+    exportSlides,
+    download,
+    backup,
+    fitText,
+    fitTexts,
+    loadFonts,
+    zip,
+  } from '#lib/editor/render.ts';
   import { ingest, loadProject, saveProject } from '#lib/editor/storage.ts';
   import CanvasEditor from '#lib/editor/CanvasEditor.svelte';
   import AuthPanel from '#lib/AuthPanel.svelte';
@@ -61,8 +80,18 @@
   let release: (() => void) | undefined;
   let saveQueue = Promise.resolve();
   let saveTimer: ReturnType<typeof setTimeout>;
+  // The latest face edit per property still loading; undo, redo or a new workspace drops them all.
+  let pendingFaces: Partial<Record<keyof TextLayer, object>> = {};
   const placed = $derived(activeLayers(workspace));
   const layer = $derived(placed.find((l) => l.id === selected));
+  const text = $derived(shown.overlays.find((l) => l.id === selected));
+  const textFont = $derived(FONTS.find((f) => f.family === text?.fontFamily));
+  // Up and down move within what the layer actually stacks against.
+  const textPeers = $derived(style === 'bento' ? shown.overlays : stack(shown));
+  let textBox = $state<HTMLTextAreaElement>();
+  let editor = $state<CanvasEditor>();
+  let burst = '';
+  let burstTimer: ReturnType<typeof setTimeout>;
   const canUndo = $derived(history.length > 0);
   const canRedo = $derived(future.length > 0);
   const sceneWidth = $derived(WIDTH * workspace.slides);
@@ -80,8 +109,12 @@
     'flex flex-col gap-[7px] text-sm leading-[1.5] text-neutral';
   const fieldInput =
     'input h-auto w-full border-primary/30 px-[9px] py-[7px] text-base leading-[1.45] text-secondary';
-  const toolButton =
-    'btn leading-[1.45] h-auto min-h-[42px] border-primary/20 bg-base-100 text-sm font-normal text-neutral/90';
+  const toolBase = 'btn leading-[1.45] h-auto min-h-[42px] text-sm font-normal';
+  const toolButton = `${toolBase} border-primary/20 bg-base-100 text-neutral/90`;
+  const toggle = (on: boolean | undefined) =>
+    on
+      ? `${toolBase} border-primary bg-primary text-primary-content`
+      : toolButton;
   function project(): Project {
     return {
       workspace: $state.snapshot(workspace),
@@ -96,7 +129,12 @@
   }
   function persist() {
     // An unreadable save stays on disk until the user starts a new collage or adds photos.
-    if (!ready || !editing || (unreadable && !assets.length)) return saveQueue;
+    if (
+      !ready ||
+      !editing ||
+      (unreadable && !assets.length && !workspace.overlays.length)
+    )
+      return saveQueue;
     clearTimeout(saveTimer);
     status = 'Saving…';
     const snapshot = project();
@@ -130,6 +168,7 @@
     }
     history = [];
     future = [];
+    pendingFaces = {};
   }
   async function acquire() {
     if (!navigator.locks) {
@@ -219,6 +258,23 @@
     urls = next;
     return () => Object.values(next).forEach(URL.revokeObjectURL);
   });
+  // Heights set while a font was cold are stale; this corrects them outside history once it loads.
+  $effect(() => {
+    if (editing)
+      void Promise.allSettled(
+        workspace.overlays.map((l) => loadFonts([l])),
+      ).then(correctTexts);
+  });
+  function correctTexts() {
+    if (!editing) return;
+    const fitted = fitTexts(workspace);
+    if (
+      fitted.overlays.some((l, i) => l.height !== workspace.overlays[i].height)
+    ) {
+      workspace = fitted;
+      scheduleSave();
+    }
+  }
   function remember() {
     history = [
       ...history.slice(-39),
@@ -252,6 +308,51 @@
     workspace = next;
     scheduleSave();
   }
+  async function focusText(added = false) {
+    await tick();
+    textBox?.focus();
+    // The default text is a placeholder: typing replaces it.
+    if (added) textBox?.select();
+  }
+  // Keystrokes land on the workspace straight away so autosave sees them, but share one history step
+  // until the field loses focus or typing pauses.
+  function typeText(value: string) {
+    if (!editing || busy || !text) return;
+    if (burst !== text.id) {
+      remember();
+      burst = text.id;
+    }
+    clearTimeout(burstTimer);
+    burstTimer = setTimeout(() => (burst = ''), 1000);
+    workspace = updateLayer(workspace, fitText({ ...text, text: value }));
+    scheduleSave();
+  }
+  // Rejects, changing nothing, when a requested face cannot load.
+  async function editText(patch: Partial<TextLayer>) {
+    if (!text) return;
+    const { id } = text;
+    const face = (['fontFamily', 'bold', 'italic'] as const).find(
+      (key) => key in patch,
+    );
+    if (face) {
+      const request = (pendingFaces[face] = {});
+      await loadFonts([{ ...text, ...patch }]);
+      if (pendingFaces[face] !== request || selected !== id) return;
+    }
+    // Merged into the latest text, so edits made during the load survive.
+    const latest = workspace.overlays.find((l) => l.id === id);
+    if (latest)
+      commit(updateLayer(workspace, fitText({ ...latest, ...patch })));
+  }
+  function previewText(patch: Partial<TextLayer>) {
+    if (text) preview = updateLayer(workspace, fitText({ ...text, ...patch }));
+  }
+  function deleteText() {
+    if (!text) return;
+    commit(removeLayer(workspace, text.id));
+    selected = '';
+    editor?.focus();
+  }
   function placedAssets() {
     return placed
       .map((l) => assets.find((a) => a.id === l.assetId)!)
@@ -262,7 +363,8 @@
     const assetId = layer?.assetId;
     style = value;
     commit({ ...workspace, style: value });
-    selected = placed.find((l) => l.assetId === assetId)?.id ?? '';
+    // Text is shared by both styles, so it stays selected.
+    if (!text) selected = placed.find((l) => l.assetId === assetId)?.id ?? '';
   }
   function chooseTemplate(template: Template) {
     if (!editing || busy) return;
@@ -292,7 +394,7 @@
     const moved = placed.length - activeLayers(next).length;
     if (moved)
       notice = `${moved} photo${moved === 1 ? '' : 's'} moved to your photo tray to keep Bento cells usable.`;
-    commit(next);
+    commit(fitTexts(next));
   }
   function insertAsset(assetId: string) {
     if (!editing || busy) return;
@@ -377,6 +479,7 @@
   }
   function undo() {
     if (!editing || !history.length) return;
+    pendingFaces = {};
     future = [structuredClone($state.snapshot(workspace)), ...future];
     workspace = history[history.length - 1];
     history = history.slice(0, -1);
@@ -385,6 +488,7 @@
   }
   function redo() {
     if (!editing || !future.length) return;
+    pendingFaces = {};
     history = [...history, structuredClone($state.snapshot(workspace))];
     workspace = future[0];
     future = future.slice(1);
@@ -426,6 +530,7 @@
       )
     )
       return;
+    pendingFaces = {};
     workspace = blank();
     style = workspace.style;
     assets = [];
@@ -595,10 +700,11 @@
       >
     </div>{/if}
   <div
-    class="grid grid-cols-[300px_minmax(0,1fr)] overflow-hidden rounded-box border border-primary/20 bg-base-100 shadow-[0_8px_36px_currentColor] shadow-base-content/6 max-[1100px]:grid-cols-[260px_minmax(0,1fr)] max-[760px]:grid-cols-1"
+    class="grid grid-cols-[300px_minmax(0,1fr)] grid-rows-[auto_1fr] overflow-hidden rounded-box border border-primary/20 bg-base-100 shadow-[0_8px_36px_currentColor] shadow-base-content/6 max-[1100px]:grid-cols-[260px_minmax(0,1fr)] max-[760px]:grid-cols-1 max-[760px]:grid-rows-none"
   >
+    <!-- The text panel opening above this column must not scroll the page and pull the canvas from under the pointer. -->
     <aside
-      class="self-start border-r border-base-300 px-[22px] py-[25px] max-[1100px]:px-4 max-[1100px]:py-5 max-[760px]:border-r-0 max-[760px]:border-b"
+      class="[overflow-anchor:none] self-start border-r border-base-300 px-[22px] py-[25px] max-[1100px]:px-4 max-[1100px]:py-5 max-[760px]:border-r-0 max-[760px]:border-b min-[761px]:col-start-1 min-[761px]:row-start-2"
     >
       <div class="flex items-center gap-[9px]">
         <span
@@ -851,7 +957,10 @@
         </p>
       </div>
     </aside>
-    <section class="flex min-w-0 flex-col" aria-label="Collage editor">
+    <section
+      class="flex min-w-0 flex-col min-[761px]:col-start-2 min-[761px]:row-span-2 min-[761px]:row-start-1"
+      aria-label="Collage editor"
+    >
       <div
         class="flex flex-wrap items-center justify-between gap-4 border-b border-base-300/70 px-[25px] py-[23px] max-[900px]:flex-col max-[900px]:items-start max-[900px]:px-4 max-[900px]:py-5 max-[640px]:flex-row"
       >
@@ -880,6 +989,7 @@
         class="canvas-dots flex flex-1 flex-col px-6 pt-7 pb-2 max-[640px]:px-[14px] max-[640px]:pt-5 max-[640px]:pb-[5px] min-[1500px]:px-[35px] min-[1500px]:pt-[35px]"
       >
         <CanvasEditor
+          bind:this={editor}
           workspace={shown}
           {assets}
           bind:selected
@@ -888,6 +998,7 @@
           onerror={fail}
           onundo={undo}
           onredo={redo}
+          onedittext={focusText}
         />
         <p class="mt-[19px] mb-3 text-center text-sm text-neutral">
           {placed.length
@@ -1081,6 +1192,177 @@
         </div>
       </div>
     </section>
+    {#if text}
+      <section
+        class="[overflow-anchor:none] border-r border-b border-base-300 px-[22px] py-[25px] max-[1100px]:px-4 max-[1100px]:py-5 max-[760px]:border-r-0 max-[760px]:border-t min-[761px]:col-start-1 min-[761px]:row-start-1"
+        aria-label="Edit text"
+      >
+        <fieldset class="grid min-w-0 gap-4" disabled={!editing || busy}>
+          <legend class="mb-3 text-base font-semibold">Edit text</legend>
+          <label class={fieldLabel}
+            >Text<textarea
+              class="textarea h-auto min-h-24 w-full border-primary/30 px-[9px] py-[7px] text-base leading-[1.45] text-secondary"
+              bind:this={textBox}
+              maxlength={MAX_TEXT}
+              value={text.text}
+              oninput={(e) => typeText(e.currentTarget.value)}
+              onblur={() => (burst = '')}></textarea></label
+          >
+          <label class={fieldLabel}
+            >Font<select
+              class="select h-auto min-h-[42px] w-full border-primary/30 text-base leading-[1.45] text-secondary"
+              aria-label="Font"
+              value={text.fontFamily}
+              onchange={(e) => {
+                const field = e.currentTarget;
+                const family = field.value;
+                editText({ fontFamily: family })
+                  .catch(fail)
+                  .finally(() => {
+                    // A failed or overtaken choice must not stay showing, unless a newer one is pending.
+                    if (field.value === family)
+                      field.value = text?.fontFamily ?? '';
+                  });
+              }}
+            >
+              {#each FONTS as font (font.family)}<option value={font.family}
+                  >{font.family} ({font.kind})</option
+                >{/each}
+            </select></label
+          >
+          <label class={fieldLabel}>
+            <span class="flex justify-between"
+              >Size<output>{Math.round(text.size)}px</output></span
+            ><input
+              class="m-0.5 min-h-[42px] w-full accent-primary"
+              aria-label="Text size"
+              type="range"
+              min={TEXT_SIZE.min}
+              max={TEXT_SIZE.max}
+              step="1"
+              value={text.size}
+              oninput={(e) => previewText({ size: +e.currentTarget.value })}
+              onchange={(e) =>
+                void editText({ size: +e.currentTarget.value }).catch(fail)}
+            /></label
+          >
+          <div class="grid gap-[7px] text-sm text-neutral">
+            <span id="text-color">Color</span>
+            <div
+              class="flex flex-wrap items-center gap-2"
+              role="group"
+              aria-labelledby="text-color"
+            >
+              {#each TEXT_COLORS as [name, color] (color)}
+                <button
+                  class={[
+                    'size-[42px] rounded-full border border-base-content/25',
+                    text.color === color &&
+                      'outline-2 outline-offset-2 outline-primary',
+                  ]}
+                  style:background-color={color}
+                  aria-label={`${name} text`}
+                  aria-pressed={text.color === color}
+                  title={name}
+                  onclick={() => void editText({ color }).catch(fail)}
+                ></button>
+              {/each}
+              <input
+                class="size-[42px] cursor-pointer rounded-full p-0"
+                type="color"
+                aria-label="Custom text color"
+                value={text.color}
+                oninput={(e) => previewText({ color: e.currentTarget.value })}
+                onchange={(e) =>
+                  void editText({ color: e.currentTarget.value }).catch(fail)}
+              />
+            </div>
+          </div>
+          <div class="flex flex-wrap gap-[7px]">
+            <button
+              class={[toggle(text.bold && textFont?.bold), 'px-3']}
+              aria-pressed={text.bold && !!textFont?.bold}
+              disabled={!textFont?.bold}
+              title={textFont?.bold
+                ? undefined
+                : `${text.fontFamily} has no bold style`}
+              onclick={() => void editText({ bold: !text?.bold }).catch(fail)}
+              ><span class="font-bold">Bold</span></button
+            ><button
+              class={[toggle(text.italic && textFont?.italic), 'px-3 italic']}
+              aria-pressed={text.italic && !!textFont?.italic}
+              disabled={!textFont?.italic}
+              title={textFont?.italic
+                ? undefined
+                : `${text.fontFamily} has no italic style`}
+              onclick={() =>
+                void editText({ italic: !text?.italic }).catch(fail)}
+              >Italic</button
+            >
+          </div>
+          <div class="join" role="group" aria-label="Text alignment">
+            {#each TEXT_ALIGNS as align (align)}
+              <button
+                class={[
+                  toggle(text.align === align),
+                  'join-item flex-1 px-1 capitalize',
+                ]}
+                aria-pressed={text.align === align}
+                onclick={() => void editText({ align }).catch(fail)}
+                >{align}</button
+              >
+            {/each}
+          </div>
+          <div
+            class="flex min-h-[42px] items-center gap-3 text-sm text-neutral"
+          >
+            <label class="flex min-h-[42px] items-center gap-2"
+              ><input
+                class="checkbox size-5"
+                type="checkbox"
+                checked={!!text.highlight}
+                onchange={(e) =>
+                  void editText({
+                    highlight: e.currentTarget.checked
+                      ? DEFAULT_HIGHLIGHT
+                      : undefined,
+                  }).catch(fail)}
+              />Highlight</label
+            >
+            {#if text.highlight}<input
+                class="size-[42px] cursor-pointer rounded-full p-0"
+                type="color"
+                aria-label="Highlight color"
+                value={text.highlight}
+                oninput={(e) =>
+                  previewText({ highlight: e.currentTarget.value })}
+                onchange={(e) =>
+                  void editText({ highlight: e.currentTarget.value }).catch(
+                    fail,
+                  )}
+              />{/if}
+          </div>
+          <div class="flex flex-wrap gap-[7px]">
+            <button
+              class={[toolButton, 'px-3']}
+              disabled={textPeers.at(-1)?.id === text.id}
+              onclick={() =>
+                commit(reorderLayer(workspace, selected, 'forward'))}
+              >Layer up</button
+            ><button
+              class={[toolButton, 'px-3']}
+              disabled={textPeers[0]?.id === text.id}
+              onclick={() =>
+                commit(reorderLayer(workspace, selected, 'backward'))}
+              >Layer down</button
+            ><button
+              class={`${toolBase} border-error/30 bg-base-100 px-3 text-error`}
+              onclick={deleteText}>Delete text</button
+            >
+          </div>
+        </fieldset>
+      </section>
+    {/if}
   </div>
   <section
     class="mt-6 flex items-center gap-[23px] rounded-[11px] border border-primary/20 bg-accent/12 px-[30px] py-[27px] max-[640px]:flex-wrap max-[640px]:gap-3 max-[640px]:px-[18px] max-[640px]:py-[22px]"
@@ -1158,11 +1440,13 @@
     <div>
       <button
         class="ml-3 px-1.5 py-px text-neutral/90"
-        disabled={!assets.length || busy}
+        disabled={(!assets.length && !workspace.overlays.length) || busy}
         onclick={exportBackup}>Download project backup</button
       ><button
         class="ml-3 px-1.5 py-px text-neutral/90"
-        disabled={!assets.length || !editing || busy}
+        disabled={(!assets.length && !workspace.overlays.length) ||
+          !editing ||
+          busy}
         onclick={reset}>New collage</button
       >
     </div>

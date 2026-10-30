@@ -14,14 +14,21 @@
     reorderLayer,
     hitLayer,
     localPoint,
+    newText,
+    resizeTextWidth,
+    stack,
     swapPhotos,
+    updateLayer,
+    type AnyLayer,
+    type Box,
     type Workspace,
     type Asset,
-    type Layer,
     type Point,
   } from './model';
   import {
     MIN_EDGE,
+    fitText,
+    loadFonts,
     paint,
     previewCache,
     previewEdges,
@@ -47,6 +54,7 @@
     onerror,
     onundo,
     onredo,
+    onedittext,
   }: {
     workspace: Workspace;
     assets: Asset[];
@@ -56,6 +64,7 @@
     onerror: (error: unknown) => void;
     onundo: () => void;
     onredo: () => void;
+    onedittext: (added?: boolean) => void;
   } = $props();
   type Gesture = {
     kind: 'move' | 'resize' | 'rotate' | 'swap' | 'divider' | 'crop';
@@ -161,9 +170,11 @@
     'btn btn-sm leading-[1.45] h-auto min-h-[34px] px-[10px] py-[6px] text-sm font-normal';
   const toolButton = `${toolBase} border-primary/30 bg-base-100 text-secondary`;
   const layers = $derived(activeLayers(scene));
-  const chosen = $derived(layers.find((l) => l.id === selected));
+  const items = $derived(stack(scene));
+  const chosen = $derived(items.find((l) => l.id === selected));
+  const chosenPhoto = $derived(chosen?.type === 'photo' ? chosen : undefined);
   const borders = $derived(dividers(scene));
-  const frame = (l: Layer) =>
+  const frame = (l: Box) =>
     `left:${(l.x / sceneWidth) * 100}%;top:${(l.y / sceneHeight) * 100}%;width:${(l.width / sceneWidth) * 100}%;height:${(l.height / sceneHeight) * 100}%;transform:rotate(${l.rotation}deg)`;
   const dpr = () => globalThis.devicePixelRatio || 1;
   const device = (v: View) => ({
@@ -208,9 +219,25 @@
   onMount(() => () => {
     void syncPreviews(previews, [], () => 0);
   });
+  // Text stays off the canvas until its face has loaded, then the paint below reruns.
+  let fontsSettled = $state(0);
+  const faces = $derived(
+    [
+      ...new Set(
+        workspace.overlays.map((l) => l.fontFamily + l.bold + l.italic),
+      ),
+    ].join(),
+  );
+  $effect(() => {
+    void faces;
+    untrack(() => loadFonts(workspace.overlays))
+      .catch(onerror)
+      .finally(() => fontsSettled++);
+  });
   // One paint per frame, of the viewport only.
   $effect(() => {
     if (!canvas || !view.scale) return;
+    void fontsSettled;
     const target = canvas;
     const workspace = scene;
     const sources = images;
@@ -289,7 +316,7 @@
     return { x: event.clientX - rect.left, y: event.clientY - rect.top };
   }
   // The single screen → world conversion used by every gesture.
-  function point(event: PointerEvent): Point {
+  function point(event: { clientX: number; clientY: number }): Point {
     const p = local(event);
     return { x: (p.x - view.x) / view.scale, y: (p.y - view.y) / view.scale };
   }
@@ -439,23 +466,26 @@
       draft = resizeDivider(g.base, g.id, p[d.axis]);
       return;
     }
-    const l = activeLayers(g.base).find((l) => l.id === g.id)!;
+    const l = stack(g.base).find((l) => l.id === g.id)!;
     const dx = p.x - g.start.x;
     const dy = p.y - g.start.y;
     if (g.kind === 'swap') {
-      dropTarget = hitLayer(g.base, p)?.id ?? '';
+      dropTarget = hitLayer(activeLayers(g.base), p)?.id ?? '';
       return;
     }
-    let changed = { ...l };
+    let changed: AnyLayer = { ...l };
     if (g.kind === 'move') {
       changed.x = clamp(l.x + dx, 48 - l.width, sceneWidth - 48);
       changed.y = clamp(l.y + dy, 48 - l.height, sceneHeight - 48);
     }
     if (g.kind === 'resize')
-      changed = resizeLayer(l, p, g.corner, {
-        width: sceneWidth,
-        height: sceneHeight,
-      });
+      changed =
+        l.type === 'text'
+          ? fitText(resizeTextWidth(l, p, g.corner, sceneWidth))
+          : resizeLayer(l, p, g.corner, {
+              width: sceneWidth,
+              height: sceneHeight,
+            });
     if (g.kind === 'rotate') {
       const center = { x: l.x + l.width / 2, y: l.y + l.height / 2 };
       const angle =
@@ -466,7 +496,7 @@
         ? Math.round(degrees / 15) * 15
         : Math.round(degrees);
     }
-    if (g.kind === 'crop') {
+    if (g.kind === 'crop' && l.type === 'photo') {
       const asset = assets.find((a) => a.id === l.assetId);
       if (!asset) return;
       const crop = coverCrop(
@@ -480,29 +510,27 @@
       );
       const from = localPoint(l, g.start);
       const to = localPoint(l, p);
-      changed.panX = clamp(
-        l.panX -
-          ((to.x - from.x) * crop.width) /
-            l.width /
-            (asset.width - crop.width || Infinity),
-        0,
-        1,
-      );
-      changed.panY = clamp(
-        l.panY -
-          ((to.y - from.y) * crop.height) /
-            l.height /
-            (asset.height - crop.height || Infinity),
-        0,
-        1,
-      );
+      changed = {
+        ...l,
+        panX: clamp(
+          l.panX -
+            ((to.x - from.x) * crop.width) /
+              l.width /
+              (asset.width - crop.width || Infinity),
+          0,
+          1,
+        ),
+        panY: clamp(
+          l.panY -
+            ((to.y - from.y) * crop.height) /
+              l.height /
+              (asset.height - crop.height || Infinity),
+          0,
+          1,
+        ),
+      };
     }
-    draft = withLayers(
-      g.base,
-      activeLayers(g.base).map((layer) =>
-        layer.id === l.id ? changed : layer,
-      ),
-    );
+    draft = updateLayer(g.base, changed);
   }
   function finish(event: PointerEvent) {
     const g = gesture;
@@ -523,6 +551,8 @@
     dragPoint = null;
     dragClient = null;
   }
+  // The side panel's delete button is gone with its text; the keyboard goes back to the canvas.
+  export const focus = () => viewport?.focus({ preventScroll: true });
   function remove() {
     if (!enabled || !chosen) return;
     const next = removeLayer(workspace, selected);
@@ -535,6 +565,20 @@
   function reorder(direction: 'front' | 'back' | 'forward' | 'backward') {
     if (enabled && chosen)
       oncommit(reorderLayer(workspace, selected, direction));
+  }
+  async function addText() {
+    if (!enabled || busy()) return;
+    const layer = newText(current, sceneHeight);
+    try {
+      await loadFonts([layer]);
+    } catch (e) {
+      onerror(e);
+      return;
+    }
+    if (!enabled) return;
+    oncommit({ ...workspace, overlays: [...workspace.overlays, layer] });
+    selected = layer.id;
+    onedittext(true);
   }
   function keys(event: KeyboardEvent) {
     if (event.key === ' ' && event.target === viewport) {
@@ -573,6 +617,7 @@
     }
     if (
       (event.key === 'ArrowLeft' || event.key === 'ArrowRight') &&
+      chosen.type === 'photo' &&
       scene.style === 'bento'
     ) {
       event.preventDefault();
@@ -588,7 +633,7 @@
     }
     if (
       ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key) &&
-      scene.style === 'scrapbook'
+      (chosen.type === 'text' || scene.style === 'scrapbook')
     ) {
       event.preventDefault();
       const delta = event.shiftKey ? 10 : 1;
@@ -615,12 +660,7 @@
           sceneHeight - 48,
         ),
       };
-      oncommit(
-        withLayers(
-          workspace,
-          activeLayers(workspace).map((l) => (l.id === selected ? next : l)),
-        ),
-      );
+      oncommit(updateLayer(workspace, next));
     }
   }
 </script>
@@ -642,7 +682,8 @@
     {scene.style === 'scrapbook'
       ? 'Drag photos to move · corners to resize · top handle to rotate'
       : 'Drag a photo onto another or use arrow keys to swap · drag a divider to resize cells'}
-    · Pinch or ctrl + scroll to zoom, drag empty space to pan.
+    · Double-click text to edit it · Pinch or ctrl + scroll to zoom, drag empty space
+    to pan.
   </p>
   <div class="flex shrink-0 items-center gap-[5px]">
     <button
@@ -664,10 +705,17 @@
 </div>
 <div
   class="mb-[10px] flex min-h-[42px] flex-wrap items-center gap-[7px] text-sm text-neutral"
-  aria-label="Selected photo actions"
+  aria-label="Selected layer actions"
 >
-  {#if chosen}
-    <strong class="mr-[5px]">Photo {layers.indexOf(chosen) + 1}</strong>
+  <button
+    class={[toolButton, 'min-h-[42px]']}
+    disabled={!enabled}
+    onclick={addText}>Add text</button
+  >
+  {#if chosen?.type === 'text'}
+    <span>Edit the selected text in the side panel.</span>
+  {:else if chosenPhoto}
+    <strong class="mr-[5px]">Photo {layers.indexOf(chosenPhoto) + 1}</strong>
     <button
       class={[
         'max-[900px]:min-h-10',
@@ -708,9 +756,9 @@
       disabled={!enabled}
       onclick={remove}>Delete photo</button
     >
-  {:else}<span>Select a photo on the canvas to edit it.</span>{/if}
+  {:else}<span>Select a photo or text on the canvas to edit it.</span>{/if}
 </div>
-{#if cropMode && chosen}<p class="mb-[10px] text-sm text-secondary">
+{#if cropMode && chosenPhoto}<p class="mb-[10px] text-sm text-secondary">
     Drag inside the selected photo to reframe it. Use Photo zoom below to get
     closer.
   </p>{/if}
@@ -730,6 +778,12 @@
   onpointermove={drag}
   onpointerup={release}
   onpointercancel={release}
+  ondblclick={(e) => {
+    // Pointer capture retargets the double-click away from the layer button that was pressed.
+    if (!chosen || !hitLayer([chosen], point(e))) return;
+    if (chosen.type === 'text') onedittext();
+    else if (enabled) cropMode = true;
+  }}
   onlostpointercapture={(e) => {
     if (e.target !== viewport) return;
     touches.delete(e.pointerId);
@@ -762,40 +816,57 @@
           class="border-r border-dashed border-base-100/60"
         ></span>{/each}
     </div>
-    {#each layers as l, i (l.id)}
-      <button
-        class={[
-          'photo-hit absolute touch-none rounded-[2px] p-0 focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-secondary',
-          cropMode && selected === l.id
-            ? 'cursor-move'
-            : 'cursor-grab active:cursor-grabbing',
-          swapping && gesture?.id === l.id && 'drag-source bg-base-300/67',
-          dropTarget === l.id &&
-            gesture?.id !== l.id &&
-            'drop-target bg-accent/33 outline-4 -outline-offset-4 outline-accent',
-        ]}
-        data-layer-id={l.id}
-        style={frame(l)}
-        style:z-index={i + 1}
-        aria-label={`Select photo ${i + 1} on canvas`}
-        aria-pressed={selected === l.id}
-        onfocus={(e) => show(e, l)}
-        onpointerdown={(e) =>
-          start(
-            e,
+    {#each items as l, i (l.id)}
+      {#if l.type === 'text'}
+        <button
+          class="text-hit absolute cursor-grab touch-none rounded-[2px] p-0 focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-secondary active:cursor-grabbing"
+          data-layer-id={l.id}
+          style={frame(l)}
+          style:z-index={i + 1}
+          aria-label={`Select text: ${l.text.slice(0, 40) || 'empty'}`}
+          aria-pressed={selected === l.id}
+          onfocus={(e) => show(e, l)}
+          onpointerdown={(e) => {
+            cropMode = false;
+            start(e, 'move', l.id);
+          }}
+          onclick={(e) => {
+            selected = l.id;
+            // Enter or space on the button: there is no double-click on a keyboard.
+            if (!e.detail) onedittext();
+          }}
+        ></button>
+      {:else}
+        <button
+          class={[
+            'photo-hit absolute touch-none rounded-[2px] p-0 focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-secondary',
             cropMode && selected === l.id
-              ? 'crop'
-              : scene.style === 'scrapbook'
-                ? 'move'
-                : 'swap',
-            l.id,
-          )}
-        onclick={() => (selected = l.id)}
-        ondblclick={() => {
-          selected = l.id;
-          cropMode = true;
-        }}
-      ></button>
+              ? 'cursor-move'
+              : 'cursor-grab active:cursor-grabbing',
+            swapping && gesture?.id === l.id && 'drag-source bg-base-300/67',
+            dropTarget === l.id &&
+              gesture?.id !== l.id &&
+              'drop-target bg-accent/33 outline-4 -outline-offset-4 outline-accent',
+          ]}
+          data-layer-id={l.id}
+          style={frame(l)}
+          style:z-index={i + 1}
+          aria-label={`Select photo ${layers.indexOf(l) + 1} on canvas`}
+          aria-pressed={selected === l.id}
+          onfocus={(e) => show(e, l)}
+          onpointerdown={(e) =>
+            start(
+              e,
+              cropMode && selected === l.id
+                ? 'crop'
+                : scene.style === 'scrapbook'
+                  ? 'move'
+                  : 'swap',
+              l.id,
+            )}
+          onclick={() => (selected = l.id)}
+        ></button>
+      {/if}
     {/each}
     {#if enabled && scene.style === 'bento'}
       {#each borders as d (d.path)}
@@ -806,7 +877,7 @@
               ? '-translate-x-1/2 cursor-col-resize'
               : '-translate-y-1/2 cursor-row-resize',
           ]}
-          style:z-index={layers.length + 1}
+          style:z-index={layers.length}
           style:left={`${((d.axis === 'x' ? d.position : d.x) / sceneWidth) * 100}%`}
           style:top={`${((d.axis === 'y' ? d.position : d.y) / sceneHeight) * 100}%`}
           style:width={d.axis === 'x'
@@ -855,13 +926,22 @@
       <div
         class="pointer-events-none absolute border-2 border-secondary"
         style={frame(chosen)}
-        style:z-index={layers.length + 2}
+        style:z-index={items.length + 2}
       >
-        <span
-          class="absolute top-[2px] left-[2px] rounded-[3px] bg-secondary px-[6px] py-[3px] text-[12px] leading-[1.2] text-secondary-content"
-          >{layers.indexOf(chosen) + 1}</span
-        >
-        {#if scene.style === 'scrapbook' && !cropMode}
+        {#if chosenPhoto}<span
+            class="absolute top-[2px] left-[2px] rounded-[3px] bg-secondary px-[6px] py-[3px] text-[12px] leading-[1.2] text-secondary-content"
+            >{layers.indexOf(chosenPhoto) + 1}</span
+          >{/if}
+        {#if chosen.type === 'text'}
+          {#each ['w', 'e'] as side (side)}<button
+              class={[
+                'pointer-events-auto absolute top-1/2 h-7 w-[14px] -translate-y-1/2 cursor-ew-resize touch-none rounded-[3px] border-2 border-secondary bg-base-100 p-0',
+                side === 'w' ? '-left-2' : '-right-2',
+              ]}
+              aria-label={`Resize text width ${side}`}
+              onpointerdown={(e) => start(e, 'resize', chosen.id, side)}
+            ></button>{/each}
+        {:else if scene.style === 'scrapbook' && !cropMode}
           {#each ['nw', 'ne', 'sw', 'se'] as corner (corner)}<button
               class={[
                 'pointer-events-auto absolute size-[14px] touch-none rounded-[3px] border-2 border-secondary bg-base-100 p-0',
@@ -875,11 +955,13 @@
               aria-label={`Resize photo ${corner}`}
               onpointerdown={(e) => start(e, 'resize', chosen.id, corner)}
             ></button>{/each}
+        {/if}
+        {#if chosen.type === 'text' || (scene.style === 'scrapbook' && !cropMode)}
           <span
             class="absolute -top-[25px] left-1/2 h-[23px] border-l-2 border-secondary"
           ></span><button
             class="pointer-events-auto absolute -top-12 left-1/2 size-7 -translate-x-1/2 cursor-grab touch-none rounded-full border border-secondary bg-base-100 p-0 text-[20px] text-secondary"
-            aria-label="Rotate photo"
+            aria-label={chosen.type === 'text' ? 'Rotate text' : 'Rotate photo'}
             onpointerdown={(e) => start(e, 'rotate', chosen.id)}>↻</button
           >
         {/if}
