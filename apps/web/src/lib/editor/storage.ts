@@ -1,10 +1,18 @@
 import { openDB } from 'idb';
-import { MAX_PHOTOS, type Asset, type Layer, type Project, type Workspace } from './model';
+import {
+  ASPECTS,
+  MAX_PHOTOS,
+  MAX_SLIDES,
+  type Asset,
+  type Layer,
+  type Project,
+  type Workspace,
+} from './model';
 import { blob } from './render';
 export const MASTER = 4096;
 export const PREVIEW = 1440;
 const db = () =>
-  openDB('living-carousel-v2', 1, {
+  openDB('living-carousel-v3', 1, {
     upgrade(db) {
       db.createObjectStore('project');
       db.createObjectStore('assets', { keyPath: 'id' });
@@ -20,7 +28,10 @@ export function validProject(
   const r = record as { workspace?: Workspace; assetIds?: unknown[] } | undefined;
   const ids = r?.assetIds;
   const layers = r?.workspace?.layers;
+  const { aspect, slides = 0 } = r?.workspace ?? {};
   if (!Array.isArray(ids) || !Array.isArray(layers) || ids.length > MAX_PHOTOS) return false;
+  if (typeof aspect !== 'string' || !Object.hasOwn(ASPECTS, aspect)) return false;
+  if (!Number.isInteger(slides) || slides < 1 || slides > MAX_SLIDES) return false;
   if (new Set(ids).size !== ids.length || ids.length !== assets.length) return false;
   const assetOk = assets.every((value, i) => {
     const a = value as Asset | undefined;

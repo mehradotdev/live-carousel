@@ -1,9 +1,15 @@
 export const WIDTH = 1080;
-export const HEIGHT = 1350;
-export const SLIDES = 3;
+export const MAX_SLIDES = 20;
+// Slide height per aspect; every slide is WIDTH wide.
+export const ASPECTS = { '4:5': 1350, '3:4': 1440, '1:1': 1080, '9:16': 1920 } as const;
+export type Aspect = keyof typeof ASPECTS;
+export const slideSize = (aspect: Aspect) => ({ width: WIDTH, height: ASPECTS[aspect] });
 export const GAP = 12;
 export const INSET = 24;
 export const MIN_TILE = 120;
+export const BENTO_PER_SLIDE = 6;
+// Scrapbook layers always keep this much of their rotated bounds on the canvas.
+export const GRAB = 48;
 export const MAX_PHOTOS = 100;
 export type Style = 'bento' | 'scrapbook';
 export const TEMPLATES = ['mosaic', 'editorial', 'balanced', 'panorama'] as const;
@@ -33,6 +39,8 @@ export type BentoNode =
   | { axis: 'x' | 'y'; ratio: number; first: BentoNode; second: BentoNode };
 export interface Workspace {
   version: 1;
+  aspect: Aspect;
+  slides: number;
   style: Style;
   seed: number;
   background: string;
@@ -69,12 +77,13 @@ function random(seed: number) {
     return n / 4294967296;
   };
 }
-const rootRect = {
+type Size = Pick<Workspace, 'aspect' | 'slides'>;
+const rootRect = ({ aspect, slides }: Size) => ({
   x: INSET,
   y: INSET,
-  width: WIDTH * SLIDES - INSET * 2,
-  height: HEIGHT - INSET * 2,
-};
+  width: WIDTH * slides - INSET * 2,
+  height: ASPECTS[aspect] - INSET * 2,
+});
 function split(rect: Rect, axis: 'x' | 'y', ratio: number): [Rect, Rect] {
   if (axis === 'x') {
     const w = (rect.width - GAP) * ratio;
@@ -121,6 +130,30 @@ function buildTree(
     second: buildTree(ids.slice(count), b, template, rng, depth + 1),
   };
 }
+// Automatic Bento places photos in `order` (at most BENTO_PER_SLIDE per slide), dropping the
+// last ones until every cell is at least MIN_TILE; `ids` is the tree order.
+function fitBento(
+  ids: string[],
+  order: string[],
+  size: Size,
+  template: Template,
+  rng: () => number,
+): BentoNode | undefined {
+  for (let n = Math.min(order.length, BENTO_PER_SLIDE * size.slides); n > 0; n--) {
+    const keep = new Set(order.slice(0, n));
+    const tree = buildTree(
+      ids.filter((id) => keep.has(id)),
+      rootRect(size),
+      template,
+      rng,
+    );
+    let fits = true;
+    visit(tree, rootRect(size), (node, rect) => {
+      if ('layerId' in node && (rect.width < MIN_TILE || rect.height < MIN_TILE)) fits = false;
+    });
+    if (fits) return tree;
+  }
+}
 function minimum(node: BentoNode): { width: number; height: number } {
   if ('layerId' in node) return { width: MIN_TILE, height: MIN_TILE };
   const a = minimum(node.first);
@@ -150,18 +183,21 @@ function visit(
 export function applyBento(workspace: Workspace): Workspace {
   if (!workspace.bento) return workspace;
   const rectangles = new Map<string, Rect>();
-  visit(workspace.bento, rootRect, (node, rect) => {
+  visit(workspace.bento, rootRect(workspace), (node, rect) => {
     if ('layerId' in node) rectangles.set(node.layerId, rect);
   });
   return {
     ...workspace,
-    layers: workspace.layers.map((l) => ({ ...l, ...rectangles.get(l.id), rotation: 0 })),
+    // Layers outside the tree are unplaced and go back to the photo tray.
+    layers: workspace.layers
+      .filter((l) => rectangles.has(l.id))
+      .map((l) => ({ ...l, ...rectangles.get(l.id), rotation: 0 })),
   };
 }
 export function dividers(workspace: Workspace): Divider[] {
   if (!workspace.bento || workspace.style !== 'bento') return [];
   const result: Divider[] = [];
-  visit(workspace.bento, rootRect, (node, rect, path) => {
+  visit(workspace.bento, rootRect(workspace), (node, rect, path) => {
     if ('layerId' in node) return;
     const a = minimum(node.first);
     const b = minimum(node.second);
@@ -199,9 +235,11 @@ export function layout(
   style: Style,
   seed = 0,
   template: Template = TEMPLATES[seed % TEMPLATES.length],
+  { aspect, slides }: Size = { aspect: '4:5', slides: 3 },
 ): Workspace {
-  if (!assets.length || assets.length > MAX_PHOTOS)
-    throw new Error(`Choose between 1 and ${MAX_PHOTOS} photos.`);
+  if (assets.length > MAX_PHOTOS)
+    throw new Error(`Keep your collage to ${MAX_PHOTOS} photos or fewer.`);
+  const slideHeight = ASPECTS[aspect];
   const rng = random(seed * 37 + TEMPLATES.indexOf(template) * 103);
   const ordered = [...assets];
   for (let i = ordered.length - 1; i > 0; i--) {
@@ -209,14 +247,14 @@ export function layout(
     [ordered[i], ordered[j]] = [ordered[j], ordered[i]];
   }
   const layers = ordered.map((asset, i): Layer => {
-    const slide = Math.floor((i * SLIDES) / assets.length);
-    const first = Math.ceil((slide * assets.length) / SLIDES);
+    const slide = Math.floor((i * slides) / assets.length);
+    const first = Math.ceil((slide * assets.length) / slides);
     const local = i - first;
-    const count = Math.ceil(((slide + 1) * assets.length) / SLIDES) - first;
+    const count = Math.ceil(((slide + 1) * assets.length) / slides) - first;
     const cols = count > 2 ? 2 : 1;
     const rows = Math.ceil(count / cols);
     const maxW = WIDTH / (cols === 1 ? 1.35 : 1.85);
-    const maxH = HEIGHT / (rows + 0.25);
+    const maxH = slideHeight / (rows + 0.25);
     const aspect = asset.width && asset.height ? asset.width / asset.height : 0.8;
     const width = Math.min(maxW, maxH * aspect) * (0.92 + rng() * 0.15);
     const height = width / aspect;
@@ -224,7 +262,7 @@ export function layout(
       id: `layer-${i}`,
       assetId: asset.id,
       x: slide * WIDTH + (((local % cols) + 0.5) * WIDTH) / cols - width / 2 + (rng() - 0.5) * 100,
-      y: ((Math.floor(local / cols) + 0.5) * HEIGHT) / rows - height / 2 + (rng() - 0.5) * 100,
+      y: ((Math.floor(local / cols) + 0.5) * slideHeight) / rows - height / 2 + (rng() - 0.5) * 100,
       width,
       height,
       rotation: (rng() - 0.5) * 18,
@@ -233,15 +271,79 @@ export function layout(
       panY: 0.5,
     };
   });
-  const workspace: Workspace = { version: 1, style, seed, background: '#f3eee4', layers, template };
-  if (style === 'scrapbook') return workspace;
-  workspace.bento = buildTree(
+  const workspace: Workspace = {
+    version: 1,
+    aspect,
+    slides,
+    style,
+    seed,
+    background: '#f3eee4',
+    layers,
+    template,
+  };
+  if (style === 'scrapbook' || !layers.length) return workspace;
+  // Layer ids are in shuffled order; placement priority follows the incoming photo order.
+  const rank = new Map(assets.map((a, i) => [a.id, i]));
+  workspace.bento = fitBento(
     layers.map((l) => l.id),
-    rootRect,
+    [...layers].sort((a, b) => rank.get(a.assetId)! - rank.get(b.assetId)!).map((l) => l.id),
+    workspace,
     template,
     rng,
   );
   return applyBento(workspace);
+}
+// Bento rebuilds the tree in the same layer order (crops kept, dividers reset). Scrapbook keeps
+// photo proportions: size and centre y scale by the height ratio, centre x stays (width is fixed).
+// Layers centred past a removed slide move onto the last slide. Every Scrapbook layer stays grabbable.
+export function resize(workspace: Workspace, aspect: Aspect, slides: number): Workspace {
+  const next = { ...workspace, aspect, slides };
+  if (workspace.style === 'bento') {
+    const template = workspace.template ?? TEMPLATES[workspace.seed % TEMPLATES.length];
+    const rng = random(workspace.seed * 37 + TEMPLATES.indexOf(template) * 103);
+    const ids = workspace.layers.map((l) => l.id);
+    const bento = fitBento(ids, ids, next, template, rng);
+    return applyBento({ ...next, template, bento });
+  }
+  const k = ASPECTS[aspect] / ASPECTS[workspace.aspect];
+  const end = WIDTH * slides;
+  return {
+    ...next,
+    layers: workspace.layers.map((l) => {
+      const width = l.width * k;
+      const height = l.height * k;
+      const cx = l.x + l.width / 2;
+      const x =
+        cx > end
+          ? clamp(
+              end - WIDTH + (cx % WIDTH) - width / 2,
+              end - WIDTH,
+              Math.max(end - WIDTH, end - width),
+            )
+          : cx - width / 2;
+      const y = (l.y + l.height / 2) * k - height / 2;
+      return keepOnCanvas({ ...l, width, height, x, y }, end, ASPECTS[aspect]);
+    }),
+  };
+}
+// Moves a layer until at least GRAB px of its rotated bounding box (or all of it, if smaller)
+// overlaps a canvas of the given size on each axis.
+export function keepOnCanvas(layer: Layer, width: number, height: number): Layer {
+  const angle = (layer.rotation * Math.PI) / 180;
+  const cos = Math.abs(Math.cos(angle));
+  const sin = Math.abs(Math.sin(angle));
+  const along = (box: number, canvas: number, centre: number) => {
+    const g = Math.min(GRAB, box, canvas);
+    // g ≤ box and g ≤ canvas, so the lower limit never exceeds the upper one.
+    return clamp(centre, g - box / 2, canvas - g + box / 2) - centre;
+  };
+  const cx = layer.x + layer.width / 2;
+  const cy = layer.y + layer.height / 2;
+  return {
+    ...layer,
+    x: layer.x + along(layer.width * cos + layer.height * sin, width, cx),
+    y: layer.y + along(layer.width * sin + layer.height * cos, height, cy),
+  };
 }
 export function coverCrop(
   sw: number,
@@ -294,7 +396,12 @@ export function swapPhotos(workspace: Workspace, source: string, target: string)
     }),
   };
 }
-export function resizeLayer(layer: Layer, pointer: Point, corner: string): Layer {
+export function resizeLayer(
+  layer: Layer,
+  pointer: Point,
+  corner: string,
+  stage: { width: number; height: number },
+): Layer {
   const sx = corner.includes('e') ? 1 : -1;
   const sy = corner.includes('s') ? 1 : -1;
   const angle = (layer.rotation * Math.PI) / 180;
@@ -319,7 +426,7 @@ export function resizeLayer(layer: Layer, pointer: Point, corner: string): Layer
   const scale = clamp(
     (w * layer.width + h * layer.height) / (layer.width ** 2 + layer.height ** 2),
     Math.max(80 / layer.width, 80 / layer.height),
-    Math.min((WIDTH * SLIDES) / layer.width, (HEIGHT * 2) / layer.height),
+    Math.min(stage.width / layer.width, (stage.height * 2) / layer.height),
   );
   const width = layer.width * scale;
   const height = layer.height * scale;

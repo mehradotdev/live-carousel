@@ -1,9 +1,8 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import {
     WIDTH,
-    HEIGHT,
-    SLIDES,
+    slideSize,
     coverCrop,
     clamp,
     dividers,
@@ -52,7 +51,7 @@
   let gesture = $state.raw<Gesture | null>(null);
   let images = $state.raw(new Map<string, ImageBitmap>());
   let zoom = $state(1);
-  let pixelScale = $state(0.5);
+  let stageWidth = $state(0);
   let cropMode = $state(false);
   let dropTarget = $state('');
   let dragPoint = $state<Point | null>(null);
@@ -117,13 +116,25 @@
     );
   });
   const scene = $derived(draft ?? workspace);
+  const sceneWidth = $derived(WIDTH * scene.slides);
+  const sceneHeight = $derived(slideSize(scene.aspect).height);
+  const pixelScale = $derived(
+    Math.min(
+      1,
+      (stageWidth * (globalThis.devicePixelRatio || 1)) / sceneWidth,
+    ) || 0.5,
+  );
   const toolBase =
     'btn btn-sm leading-[1.45] h-auto min-h-[34px] px-[10px] py-[6px] text-sm font-normal';
   const toolButton = `${toolBase} border-primary/30 bg-base-100 text-secondary`;
   const chosen = $derived(scene.layers.find((l) => l.id === selected));
   const borders = $derived(dividers(scene));
+  // Tall formats are capped at 70vh at 100% so a single 9:16 slide never outgrows the screen.
+  const stripWidth = $derived(
+    `min(${zoom * 100}%, ${(zoom * 70 * sceneWidth) / sceneHeight}vh)`,
+  );
   const frame = (l: Layer) =>
-    `left:${(l.x / (WIDTH * SLIDES)) * 100}%;top:${(l.y / HEIGHT) * 100}%;width:${(l.width / (WIDTH * SLIDES)) * 100}%;height:${(l.height / HEIGHT) * 100}%;transform:rotate(${l.rotation}deg)`;
+    `left:${(l.x / sceneWidth) * 100}%;top:${(l.y / sceneHeight) * 100}%;width:${(l.width / sceneWidth) * 100}%;height:${(l.height / sceneHeight) * 100}%;transform:rotate(${l.rotation}deg)`;
   const previews = new Map<string, Promise<ImageBitmap>>();
   $effect(() => {
     let alive = true;
@@ -157,13 +168,14 @@
   $effect(() => {
     if (!enabled) cancel();
   });
+  // An outside change (format, slide count, sidebar edit) makes the gesture's base stale.
+  $effect(() => {
+    void workspace;
+    untrack(cancel);
+  });
   onMount(() => {
     const observer = new ResizeObserver(() => {
-      if (stage)
-        pixelScale = Math.min(
-          1,
-          (stage.clientWidth * devicePixelRatio) / (WIDTH * SLIDES),
-        );
+      if (stage) stageWidth = stage.clientWidth;
     });
     if (stage) observer.observe(stage);
     return () => observer.disconnect();
@@ -171,8 +183,8 @@
   function point(event: PointerEvent): Point {
     const rect = stage!.getBoundingClientRect();
     return {
-      x: ((event.clientX - rect.left) / rect.width) * WIDTH * SLIDES,
-      y: ((event.clientY - rect.top) / rect.height) * HEIGHT,
+      x: ((event.clientX - rect.left) / rect.width) * sceneWidth,
+      y: ((event.clientY - rect.top) / rect.height) * sceneHeight,
     };
   }
   function start(
@@ -227,10 +239,14 @@
     }
     let changed = { ...l };
     if (g.kind === 'move') {
-      changed.x = clamp(l.x + dx, 48 - l.width, WIDTH * SLIDES - 48);
-      changed.y = clamp(l.y + dy, 48 - l.height, HEIGHT - 48);
+      changed.x = clamp(l.x + dx, 48 - l.width, sceneWidth - 48);
+      changed.y = clamp(l.y + dy, 48 - l.height, sceneHeight - 48);
     }
-    if (g.kind === 'resize') changed = resizeLayer(l, p, g.corner);
+    if (g.kind === 'resize')
+      changed = resizeLayer(l, p, g.corner, {
+        width: sceneWidth,
+        height: sceneHeight,
+      });
     if (g.kind === 'rotate') {
       const center = { x: l.x + l.width / 2, y: l.y + l.height / 2 };
       const angle =
@@ -360,7 +376,7 @@
                 ? delta
                 : 0),
           48 - chosen.width,
-          WIDTH * SLIDES - 48,
+          sceneWidth - 48,
         ),
         y: clamp(
           chosen.y +
@@ -370,7 +386,7 @@
                 ? delta
                 : 0),
           48 - chosen.height,
-          HEIGHT - 48,
+          sceneHeight - 48,
         ),
       };
       oncommit({
@@ -470,9 +486,10 @@
   class="-mx-[14px] overflow-auto px-[14px] pt-10 pb-5 [scrollbar-width:thin]"
 >
   <div
-    class="relative aspect-[3240/1350] min-w-0 shadow-[0_3px_20px_currentColor] shadow-base-content/8 outline-none focus-visible:outline-2 focus-visible:outline-offset-8 focus-visible:outline-primary"
+    class="relative mx-auto min-w-0 shadow-[0_3px_20px_currentColor] shadow-base-content/8 outline-none focus-visible:outline-2 focus-visible:outline-offset-8 focus-visible:outline-primary"
     bind:this={stage}
-    style:width={`${zoom * 100}%`}
+    style:width={stripWidth}
+    style:aspect-ratio={`${sceneWidth} / ${sceneHeight}`}
     role="group"
     tabindex="-1"
     aria-label="Interactive collage canvas"
@@ -487,15 +504,16 @@
     <canvas
       class="block size-full"
       bind:this={canvas}
-      aria-label="Your continuous three-slide collage"
+      aria-label={`Your continuous ${scene.slides}-slide collage`}
     ></canvas>
     <div
-      class="pointer-events-none absolute inset-0 grid grid-cols-3"
+      class="pointer-events-none absolute inset-0 grid"
+      style:grid-template-columns={`repeat(${scene.slides}, minmax(0, 1fr))`}
       aria-hidden="true"
     >
-      <span class="border-r border-dashed border-base-100/60"></span><span
-        class="border-r border-dashed border-base-100/60"
-      ></span><span></span>
+      {#each { length: scene.slides - 1 }, i (i)}<span
+          class="border-r border-dashed border-base-100/60"
+        ></span>{/each}
     </div>
     <button
       class="absolute inset-0 size-full"
@@ -549,14 +567,14 @@
               ? '-translate-x-1/2 cursor-col-resize'
               : '-translate-y-1/2 cursor-row-resize',
           ]}
-          style:left={`${((d.axis === 'x' ? d.position : d.x) / (WIDTH * SLIDES)) * 100}%`}
-          style:top={`${((d.axis === 'y' ? d.position : d.y) / HEIGHT) * 100}%`}
+          style:left={`${((d.axis === 'x' ? d.position : d.x) / sceneWidth) * 100}%`}
+          style:top={`${((d.axis === 'y' ? d.position : d.y) / sceneHeight) * 100}%`}
           style:width={d.axis === 'x'
             ? '12px'
-            : `${(d.width / (WIDTH * SLIDES)) * 100}%`}
+            : `${(d.width / sceneWidth) * 100}%`}
           style:height={d.axis === 'y'
             ? '12px'
-            : `${(d.height / HEIGHT) * 100}%`}
+            : `${(d.height / sceneHeight) * 100}%`}
           aria-label={`Resize ${d.axis === 'x' ? 'vertical' : 'horizontal'} divider ${d.path || 'root'}`}
           onpointerdown={(e) => start(e, 'divider', d.path)}
           onkeydown={(e) => {
@@ -649,7 +667,11 @@
   </div>
 </div>
 <div
-  class="mt-3 grid grid-cols-3 text-center text-sm tracking-[0.5px] text-neutral"
+  class="mx-auto mt-3 grid text-center text-sm tracking-[0.5px] text-neutral"
+  style:width={stripWidth}
+  style:grid-template-columns={`repeat(${scene.slides}, minmax(0, 1fr))`}
 >
-  <span>Slide 1</span><span>Slide 2</span><span>Slide 3</span>
+  {#each { length: scene.slides }, i (i)}<span
+      >{scene.slides > 6 ? i + 1 : `Slide ${i + 1}`}</span
+    >{/each}
 </div>

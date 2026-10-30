@@ -38,7 +38,7 @@ test('guest creates, crops, undoes, restores and exports three full-resolution s
   await page.goto('/');
   await expect(page.getByLabel('Upload photos')).toBeEnabled();
   await upload(page);
-  await expect(page.getByLabel('Your continuous three-slide collage')).toBeVisible();
+  await expect(page.getByLabel('Your continuous 3-slide collage')).toBeVisible();
   await page.getByLabel('Photo zoom').fill('2');
   await expect(page.getByLabel('Photo zoom')).toHaveValue('2');
   await page.getByRole('button', { name: 'Undo', exact: true }).click();
@@ -70,14 +70,14 @@ test('single editing tab hands ownership over without losing the workspace', asy
   await page.goto('/');
   await expect(page.getByLabel('Upload photos')).toBeEnabled();
   await upload(page, 3);
-  await expect(page.getByLabel('Your continuous three-slide collage')).toBeVisible();
+  await expect(page.getByLabel('Your continuous 3-slide collage')).toBeVisible();
   const second = await context.newPage();
   await second.goto('/');
   await expect(second.getByLabel('Upload photos')).toBeDisabled();
   await second.getByRole('button', { name: 'Edit here', exact: true }).click();
   await expect(second.getByLabel('Upload photos')).toBeEnabled();
   await expect(page.getByLabel('Upload photos')).toBeDisabled();
-  await expect(second.getByLabel('Your continuous three-slide collage')).toBeVisible();
+  await expect(second.getByLabel('Your continuous 3-slide collage')).toBeVisible();
 });
 test('unsupported files fail visibly and mobile layout stays within the viewport', async ({
   page,
@@ -91,7 +91,7 @@ test('unsupported files fail visibly and mobile layout stays within the viewport
   await expect(page.getByRole('alert')).toContainText('use JPEG, PNG or WebP');
   await upload(page, 3);
   await page.getByRole('button', { name: /Scrapbook/ }).click();
-  await expect(page.getByLabel('Your continuous three-slide collage')).toBeVisible();
+  await expect(page.getByLabel('Your continuous 3-slide collage')).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: 'test-results/editor-mobile.png', fullPage: true });
 });
@@ -109,7 +109,7 @@ test('auth proxy resolves guest sessions and invalid links preserve the local co
   await expect(page.getByRole('status').filter({ hasText: 'Saved on this device' })).toBeVisible();
   await page.goto('/?sign_in_error=1');
   await expect(page.getByRole('alert')).toContainText('invalid or expired');
-  await expect(page.getByLabel('Your continuous three-slide collage')).toBeVisible();
+  await expect(page.getByLabel('Your continuous 3-slide collage')).toBeVisible();
   if (session.status() === 200) {
     await expect(page.getByLabel('Email address', { exact: true })).toBeVisible();
     await page.route('**/api/auth/sign-in/magic-link', (route) =>
@@ -122,7 +122,7 @@ test('auth proxy resolves guest sessions and invalid links preserve the local co
     await page.getByLabel('Email address', { exact: true }).fill('test@example.com');
     await page.getByRole('button', { name: 'Email me a sign-in link' }).click();
     await expect(page.locator('.auth-error')).toContainText('wait a minute');
-    await expect(page.getByLabel('Your continuous three-slide collage')).toBeVisible();
+    await expect(page.getByLabel('Your continuous 3-slide collage')).toBeVisible();
   }
 });
 
@@ -366,7 +366,7 @@ test('legacy workspaces retain their photos and transforms until a new Bento tem
   await upload(page, 6);
   const original = await saved(page);
   await page.evaluate(async () => {
-    const r = indexedDB.open('living-carousel-v2', 1);
+    const r = indexedDB.open('living-carousel-v3', 1);
     const db = await new Promise<IDBDatabase>((resolve) => (r.onsuccess = () => resolve(r.result)));
     await new Promise<void>((resolve) => {
       const tx = db.transaction('project', 'readwrite');
@@ -627,7 +627,7 @@ test('touch devices prepare slides first and open the share sheet from a fresh t
   expect(await page.evaluate(() => (window as unknown as { shared: unknown[] }).shared)).toEqual([
     {
       active: true,
-      names: ['living-carousel-1.png', 'living-carousel-2.png', 'living-carousel-3.png'],
+      names: ['living-carousel-01.png', 'living-carousel-02.png', 'living-carousel-03.png'],
     },
   ]);
   await page.getByRole('button', { name: /Download images/ }).click();
@@ -646,7 +646,7 @@ test('an unreadable saved collage shows an error and is not overwritten by autos
     page.evaluate(
       (change) =>
         new Promise<unknown>((resolve, reject) => {
-          const open = indexedDB.open('living-carousel-v2');
+          const open = indexedDB.open('living-carousel-v3');
           open.onerror = () => reject(open.error);
           open.onsuccess = () => {
             const store = open.result.transaction('project', 'readwrite').objectStore('project');
@@ -670,4 +670,98 @@ test('an unreadable saved collage shows an error and is not overwritten by autos
   await page.evaluate(() => window.dispatchEvent(new Event('pagehide')));
   await page.waitForTimeout(300);
   expect(await record(false)).toEqual([null]);
+});
+
+async function exported(page: Page) {
+  const pending = page.waitForEvent('download');
+  await page.getByRole('button', { name: /Download images/ }).click();
+  const stream = await (await pending).createReadStream();
+  const chunks = [];
+  for await (const c of stream!) chunks.push(c);
+  const files = unzipSync(Buffer.concat(chunks));
+  return Object.entries(files)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([name, png]) => {
+      const bytes = Buffer.from(png);
+      return { name, bytes, size: [bytes.readUInt32BE(16), bytes.readUInt32BE(20)] };
+    });
+}
+test('ratio and slide count drive layout and export, and each change is one undo step', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await upload(page, 4);
+  const before = (await saved(page)).workspace;
+  const tall = page.getByRole('button', { name: /^9:16/ });
+  await tall.click();
+  await expect(tall).toHaveAttribute('aria-pressed', 'true');
+  await page.getByRole('button', { name: 'Add a slide' }).click();
+  await page.getByRole('button', { name: 'Add a slide' }).click();
+  await expect(page.locator('output')).toHaveText('5\u00a0slides');
+  await expect(page.getByLabel('Your continuous 5-slide collage')).toBeVisible();
+  let w = (await saved(page)).workspace;
+  expect([w.aspect, w.slides]).toEqual(['9:16', 5]);
+  expect(w.layers.map((l) => l.assetId)).toEqual(before.layers.map((l) => l.assetId));
+  const files = await exported(page);
+  expect(files.map((f) => f.name)).toEqual([1, 2, 3, 4, 5].map((n) => `living-carousel-0${n}.png`));
+  for (const f of files) expect(f.size).toEqual([1080, 1920]);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  for (const slides of [4, 3]) {
+    await page.getByRole('button', { name: 'Undo', exact: true }).click();
+    expect((await saved(page)).workspace.slides).toBe(slides);
+  }
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  expect((await saved(page)).workspace).toEqual(before);
+  await page.getByRole('button', { name: 'Remove a slide' }).click();
+  await page.getByRole('button', { name: 'Remove a slide' }).click();
+  await expect(page.getByRole('button', { name: 'Remove a slide' })).toBeDisabled();
+  w = (await saved(page)).workspace;
+  expect(w.slides).toBe(1);
+  for (const l of w.layers) expect(l.x + l.width).toBeLessThanOrEqual(1080);
+  await expect(page.getByText('1 slide,')).toBeAttached();
+  expect(await exported(page)).toHaveLength(1);
+});
+test('an empty collage exports blank background slides, up to 20 in 9:16', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  const blank = await exported(page);
+  expect(blank).toHaveLength(3);
+  for (const f of blank) {
+    expect(f.size).toEqual([1080, 1350]);
+    expect(f.bytes.equals(blank[0].bytes)).toBe(true);
+  }
+  await page.getByRole('button', { name: /^9:16/ }).click();
+  const add = page.getByRole('button', { name: 'Add a slide' });
+  for (let i = 3; i < 20; i++) await add.click();
+  await expect(add).toBeDisabled();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  const files = await exported(page);
+  expect(files.map((f) => f.name).at(-1)).toBe('living-carousel-20.png');
+  for (const f of files) expect(f.size).toEqual([1080, 1920]);
+});
+
+test('a format change during a drag cancels the gesture instead of reverting the format', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await upload(page, 3);
+  await page.getByRole('button', { name: /Scrapbook/ }).click();
+  const before = (await saved(page)).workspace;
+  const photo = page.locator(`[data-layer-id="${before.layers[0].id}"]`);
+  await photo.scrollIntoViewIfNeeded();
+  const b = (await photo.boundingBox())!;
+  await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(b.x + b.width / 2 + 40, b.y + b.height / 2 + 20, { steps: 5 });
+  // A second input (keyboard or another touch) changes the format mid-drag.
+  await page.getByRole('button', { name: /^1:1/ }).evaluate((el) => (el as HTMLElement).click());
+  await page.mouse.move(b.x + b.width / 2 + 80, b.y + b.height / 2 + 40, { steps: 5 });
+  await page.mouse.up();
+  await expect(page.getByRole('button', { name: /^1:1/ })).toHaveAttribute('aria-pressed', 'true');
+  const after = (await saved(page)).workspace;
+  expect(after.aspect).toBe('1:1');
+  expect(after.layers[0].width).toBeCloseTo((before.layers[0].width * 1080) / 1350);
 });

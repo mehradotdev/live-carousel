@@ -1,13 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vite-plus/test';
-import {
-  HEIGHT,
-  SLIDES,
-  WIDTH,
-  slideLayers,
-  type Asset,
-  type Layer,
-  type Workspace,
-} from './model';
+import { ASPECTS, WIDTH, slideLayers, type Asset, type Layer, type Workspace } from './model';
 import { draw, paint, sourceRect, syncPreviews } from './render';
 import { fit, MASTER, PREVIEW, transparent, validProject } from './storage';
 const layer = (x: number, extra: Partial<Layer> = {}): Layer => ({
@@ -64,14 +56,30 @@ describe('image pipeline', () => {
     expect(preview.width / 1440).toBeCloseTo(master.width / 4096, 10);
     expect(preview.height / 960).toBeCloseTo(master.height / 2731, 10);
   });
-  it('renders slide i as exactly the region [i*WIDTH, 0, WIDTH, HEIGHT]', () => {
-    for (let i = 0; i < SLIDES; i++) {
+  it('renders slide i as exactly the region [i*WIDTH, 0, WIDTH, height] for every size', () => {
+    for (const [aspect, slides] of [
+      ['4:5', 3],
+      ['9:16', 20],
+      ['1:1', 1],
+    ] as const) {
+      const workspace = {
+        aspect,
+        slides,
+        style: 'bento',
+        background: '#fff',
+        layers: [],
+      } as unknown as Workspace;
+      for (let i = 0; i < slides; i++) {
+        const calls: [string, unknown[]][] = [];
+        const canvas = recorder(calls);
+        paint({ workspace, assets: [] }, new Map(), canvas, 1, i);
+        expect([canvas.width, canvas.height]).toEqual([WIDTH, ASPECTS[aspect]]);
+        expect(calls.find(([k]) => k === 'translate')?.[1]).toEqual([-i * WIDTH, 0]);
+      }
       const calls: [string, unknown[]][] = [];
-      const canvas = recorder(calls);
-      const workspace = { style: 'bento', background: '#fff', layers: [] } as unknown as Workspace;
-      paint({ workspace, assets: [] }, new Map(), canvas, 1, i);
-      expect([canvas.width, canvas.height]).toEqual([WIDTH, HEIGHT]);
-      expect(calls.find(([k]) => k === 'translate')?.[1]).toEqual([-i * WIDTH, 0]);
+      const wide = recorder(calls);
+      paint({ workspace, assets: [] }, new Map(), wide, 0.5);
+      expect([wide.width, wide.height]).toEqual([WIDTH * slides * 0.5, ASPECTS[aspect] * 0.5]);
     }
   });
   it('decodes only the layers that can reach a slide, including seam-crossing ones', () => {
@@ -130,12 +138,16 @@ describe('image pipeline', () => {
   });
   it('rejects saved projects that would break the editor', () => {
     const good = () => ({
-      record: { workspace: { layers: [layer(0)] }, assetIds: ['a'] },
+      record: { workspace: { aspect: '4:5', slides: 3, layers: [layer(0)] }, assetIds: ['a'] },
       assets: [{ ...asset, name: 'a.jpg', masterBlob: new Blob(), previewBlob: new Blob() }],
     });
     const ok = good();
     expect(validProject(ok.record, ok.assets)).toBe(true);
     const cases: ((p: ReturnType<typeof good>) => void)[] = [
+      (p) => (p.record.workspace.aspect = '2:3'),
+      (p) => (p.record.workspace.slides = 0),
+      (p) => (p.record.workspace.slides = 21),
+      (p) => (p.record.workspace.slides = 2.5),
       (p) => ((p.record.workspace.layers as unknown[]) = [null]),
       (p) => (p.record.workspace.layers[0].zoom = NaN),
       (p) => ((p.record.workspace.layers[0] as unknown as { x: string }).x = '10'),

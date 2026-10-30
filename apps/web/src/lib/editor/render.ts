@@ -2,9 +2,7 @@ import { zipSync } from 'fflate';
 import {
   coverCrop,
   slideLayers,
-  WIDTH,
-  HEIGHT,
-  SLIDES,
+  slideSize,
   type Asset,
   type Layer,
   type Project,
@@ -27,14 +25,15 @@ export function sourceRect(asset: Asset, image: { width: number; height: number 
   return { x: crop.x * sx, y: crop.y * sy, width: crop.width * sx, height: crop.height * sy };
 }
 function begin(workspace: Workspace, canvas: HTMLCanvasElement, scale: number, slide?: number) {
-  canvas.width = Math.round((slide === undefined ? WIDTH * SLIDES : WIDTH) * scale);
-  canvas.height = Math.round(HEIGHT * scale);
+  const { width, height } = slideSize(workspace.aspect);
+  canvas.width = Math.round((slide === undefined ? width * workspace.slides : width) * scale);
+  canvas.height = Math.round(height * scale);
   const ctx = canvas.getContext('2d');
   if (!ctx) throw new Error('Canvas is unavailable.');
   ctx.scale(scale, scale);
   ctx.fillStyle = workspace.background;
-  ctx.fillRect(0, 0, WIDTH * SLIDES, HEIGHT);
-  if (slide !== undefined) ctx.translate(-slide * WIDTH, 0);
+  ctx.fillRect(0, 0, width * workspace.slides, height);
+  if (slide !== undefined) ctx.translate(-slide * width, 0);
   return ctx;
 }
 function paintLayer(
@@ -161,14 +160,15 @@ export function blob(canvas: HTMLCanvasElement, type: string, quality = 0.94): P
     ),
   );
 }
-// One WIDTH×HEIGHT canvas and one master at a time, to stay under phone canvas and memory limits.
+// One slide-sized canvas and one master at a time, to stay under phone canvas and memory limits.
 export async function exportSlides(project: Project, format: 'png' | 'jpeg') {
   const files: File[] = [];
   const canvas = document.createElement('canvas');
   try {
-    for (let i = 0; i < SLIDES; i++) {
+    for (let i = 0; i < project.workspace.slides; i++) {
       await draw(project, canvas, 1, i, slideLayers(project.workspace, i));
-      const name = `living-carousel-${i + 1}.${format === 'jpeg' ? 'jpg' : 'png'}`;
+      const number = String(i + 1).padStart(2, '0');
+      const name = `living-carousel-${number}.${format === 'jpeg' ? 'jpg' : 'png'}`;
       files.push(
         new File([await blob(canvas, `image/${format}`)], name, { type: `image/${format}` }),
       );
