@@ -8,12 +8,13 @@
     type Template,
     WIDTH,
     HEIGHT,
+    MAX_PHOTOS,
     type Asset,
     type Workspace,
     type Project,
     type Style,
   } from '#lib/editor/model.ts';
-  import { exportSlides, download, backup } from '#lib/editor/render.ts';
+  import { exportSlides, download, backup, zip } from '#lib/editor/render.ts';
   import { ingest, loadProject, saveProject } from '#lib/editor/storage.ts';
   import CanvasEditor from '#lib/editor/CanvasEditor.svelte';
   import AuthPanel from '#lib/AuthPanel.svelte';
@@ -35,6 +36,8 @@
   let showMotion = $state(false);
   let dragOver = $state(false);
   let format = $state<'png' | 'jpeg'>('png');
+  let shareFiles = $state.raw<File[] | null>(null);
+  let unreadable = false;
   let channel: BroadcastChannel | undefined;
   let release: (() => void) | undefined;
   let saveQueue = Promise.resolve();
@@ -61,7 +64,8 @@
         : 'Something went wrong. Please try again.';
   }
   function persist() {
-    if (!ready || !editing) return saveQueue;
+    // An unreadable save stays on disk until the user starts a new collage or adds photos.
+    if (!ready || !editing || (unreadable && !assets.length)) return saveQueue;
     clearTimeout(saveTimer);
     status = 'Saving…';
     const snapshot = workspace ? project() : null;
@@ -114,6 +118,7 @@
         try {
           await restore();
         } catch (e) {
+          unreadable = true;
           fail(e);
         }
         editing = true;
@@ -179,7 +184,7 @@
   $effect(() => {
     const current = assets;
     const next: Record<string, string> = {};
-    for (const a of current) next[a.id] = URL.createObjectURL(a.blob);
+    for (const a of current) next[a.id] = URL.createObjectURL(a.previewBlob);
     urls = next;
     return () => Object.values(next).forEach(URL.revokeObjectURL);
   });
@@ -376,6 +381,7 @@
     future = [];
     selected = '';
     error = '';
+    unreadable = false;
     await persist();
   }
   async function exportImages() {
@@ -383,12 +389,47 @@
     busy = true;
     error = '';
     try {
-      download(await exportSlides(project(), format), 'living-carousel.zip');
+      const files = await exportSlides(project(), format);
+      // Export outlives the tap's user activation, so the share sheet opens from a second tap.
+      if (
+        matchMedia('(pointer: coarse)').matches &&
+        navigator.canShare?.({ files })
+      ) {
+        shareFiles = files;
+        notice = 'Your slides are ready. Tap Share slides to save them.';
+        return;
+      }
+      download(await zip(files), 'living-carousel.zip');
       notice = 'Your three slides are ready in the ZIP download.';
     } catch (e) {
       fail(e);
     } finally {
       busy = false;
+    }
+  }
+  $effect(() => {
+    void [workspace, assets, format];
+    shareFiles = null;
+  });
+  async function shareSlides() {
+    const files = shareFiles;
+    if (!files) return;
+    error = '';
+    try {
+      await navigator.share({ files });
+      shareFiles = null;
+      notice = 'Your slides are ready to save from the share sheet.';
+    } catch (e) {
+      if (e instanceof DOMException && e.name === 'AbortError') return;
+      shareFiles = null;
+      fail(e);
+      try {
+        download(await zip(files), 'living-carousel.zip');
+        notice =
+          'Sharing failed, so your three slides are in the ZIP download.';
+      } catch (zipError) {
+        fail(zipError);
+      }
     }
   }
   async function exportBackup() {
@@ -581,7 +622,7 @@
         >
         <h2 class="text-base font-semibold">Add your moments</h2>
         <span class="count ml-auto text-sm text-neutral"
-          >{assets.length}/15</span
+          >{assets.length}/{MAX_PHOTOS}</span
         >
       </div>
       <input
@@ -917,7 +958,10 @@
             onclick={exportImages}
             >Download images <span class="ml-[10px] text-[17px]">↓</span
             ></button
-          >
+          >{#if shareFiles}<button
+              class="btn leading-[1.45] h-auto min-h-[42px] border-0 btn-primary px-[18px] py-3 text-sm font-normal"
+              onclick={shareSlides}>Share slides</button
+            >{/if}
         </div>
       </div>
     </section>

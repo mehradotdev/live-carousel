@@ -4,14 +4,16 @@ export const SLIDES = 3;
 export const GAP = 12;
 export const INSET = 24;
 export const MIN_TILE = 120;
+export const MAX_PHOTOS = 100;
 export type Style = 'bento' | 'scrapbook';
 export const TEMPLATES = ['mosaic', 'editorial', 'balanced', 'panorama'] as const;
 export type Template = (typeof TEMPLATES)[number];
 export interface Asset {
   id: string;
   name: string;
-  blob: Blob;
-  width: number;
+  masterBlob: Blob; // ≤4096px, metadata stripped, immutable
+  previewBlob: Blob; // ≤1440px, editor only
+  width: number; // master pixels; crops are computed in this space
   height: number;
 }
 export interface Layer {
@@ -198,7 +200,8 @@ export function layout(
   seed = 0,
   template: Template = TEMPLATES[seed % TEMPLATES.length],
 ): Workspace {
-  if (!assets.length || assets.length > 15) throw new Error('Choose between 1 and 15 photos.');
+  if (!assets.length || assets.length > MAX_PHOTOS)
+    throw new Error(`Choose between 1 and ${MAX_PHOTOS} photos.`);
   const rng = random(seed * 37 + TEMPLATES.indexOf(template) * 103);
   const ordered = [...assets];
   for (let i = ordered.length - 1; i > 0; i--) {
@@ -253,6 +256,14 @@ export function coverCrop(
   const width = dw / scale;
   const height = dh / scale;
   return { x: (sw - width) * clamp(px, 0, 1), y: (sh - height) * clamp(py, 0, 1), width, height };
+}
+// Layers whose rotated frame, Scrapbook border or shadow can reach slide `slide`.
+export function slideLayers(workspace: Workspace, slide: number) {
+  return workspace.layers.filter((l) => {
+    const reach = Math.hypot(l.width + 24, l.height + 64) / 2 + 60;
+    const cx = l.x + l.width / 2;
+    return cx + reach > slide * WIDTH && cx - reach < (slide + 1) * WIDTH;
+  });
 }
 export function localPoint(layer: Layer, point: Point): Point {
   const angle = (-layer.rotation * Math.PI) / 180;

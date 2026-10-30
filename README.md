@@ -20,9 +20,9 @@ Open http://localhost:5173. No API keys are needed for the free editor; email si
 - Freeform Scrapbook photos: mouse dragging across slide seams, corner resizing, rotation handle, deletion, and forward/backward/front/back stacking.
 - Crop mode (double-click or Crop photo), crop/zoom controls, precise numeric transforms, and undo/redo. One mouse gesture creates one undo entry; Escape cancels an in-progress gesture.
 - Canvas zoom and horizontal scrolling. Keyboard arrows move a selected Scrapbook photo (Shift for larger steps); Delete removes it. Original photos remain in the library and can be added back.
-- JPEG, PNG and WebP input (initially 3–15 photos, 20 MB and 40 megapixels per photo). After creating a collage, Scrapbook photos can be intentionally deleted down to an empty canvas; originals remain in the library.
-- Transactional IndexedDB saves with original image blobs, reload restoration and exclusive-tab ownership with cooperative takeover.
-- PNG or JPEG slides packaged in a ZIP; a project backup ZIP containing JSON and original assets.
+- JPEG, PNG and WebP input (3–100 photos, 20 MB and 40 megapixels per photo). Each upload is decoded once into an immutable master (≤4096px, metadata stripped) and a 1440px editing preview; the uploaded file is not kept. Scrapbook photos can be intentionally deleted down to an empty canvas; masters remain in the library.
+- Transactional IndexedDB saves (photos written once, workspace on every change), reload restoration and exclusive-tab ownership with cooperative takeover.
+- PNG or JPEG slides rendered one slide at a time from masters: a ZIP on desktop, the share sheet on touch devices that can share files; a project backup ZIP containing JSON and master images.
 - Responsive desktop/mobile layouts and keyboard-accessible form controls.
 
 The project backup is an archive; importing backups is not implemented. Storage is per browser and can be cleared or evicted. Files stay local. The page currently loads typography from Google Fonts; it does not send photo data there.

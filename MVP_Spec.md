@@ -170,7 +170,7 @@ These override any conflicting text below.
   $$\text{Global Canvas Width} = N \times W, \quad \text{Global Canvas Height} = H$$
 - **Slide Extraction Rectangles:** Slide index $i \in [0, N-1]$ corresponds strictly to logical crop box:
   $$\text{CropBox}_i = [i \times W, \, 0, \, W, \, H]$$
-- **Asset Immutability:** On ingest each photo is decoded once (EXIF orientation applied) and stored as an immutable master (≤4096px long edge, JPEG 0.92 or PNG when transparent, metadata stripped) plus a 1440px preview. Uploaded files are not kept. The editor uses previews; export decodes masters one slide at a time. Transformations (scale, translation, rotation, crop window) apply exclusively to Layer instances.
+- **Asset Immutability:** On ingest each photo is decoded once (EXIF orientation applied) and stored as an immutable master (≤4096px long edge, JPEG 0.92 or PNG when the master has any transparency, metadata stripped) plus a 1440px preview in the same format. Uploaded files are not kept. The editor decodes previews once per photo at display size; export renders one slide at a time and decodes, paints and closes one master at a time. Transformations (scale, translation, rotation, crop window) apply exclusively to Layer instances.
 
 ### Bento Grid Mode Rules
 

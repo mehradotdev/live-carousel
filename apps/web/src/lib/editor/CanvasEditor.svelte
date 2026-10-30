@@ -18,7 +18,7 @@
     type Layer,
     type Point,
   } from './model';
-  import { decodeImages, paint } from './render';
+  import { paint, previewEdge, sourceRect, syncPreviews } from './render';
   let {
     workspace,
     assets,
@@ -101,15 +101,9 @@
     ghostCanvas.style.height = `${height}px`;
     const ctx = ghostCanvas.getContext('2d');
     if (!ctx) return;
-    const crop = coverCrop(
-      image.width,
-      image.height,
-      l.width,
-      l.height,
-      l.zoom,
-      l.panX,
-      l.panY,
-    );
+    const asset = assets.find((a) => a.id === l.assetId);
+    if (!asset) return;
+    const crop = sourceRect(asset, image, l);
     ctx.drawImage(
       image,
       crop.x,
@@ -130,30 +124,20 @@
   const borders = $derived(dividers(scene));
   const frame = (l: Layer) =>
     `left:${(l.x / (WIDTH * SLIDES)) * 100}%;top:${(l.y / HEIGHT) * 100}%;width:${(l.width / (WIDTH * SLIDES)) * 100}%;height:${(l.height / HEIGHT) * 100}%;transform:rotate(${l.rotation}deg)`;
+  const previews = new Map<string, Promise<ImageBitmap>>();
   $effect(() => {
     let alive = true;
-    let decoded = new Map<string, ImageBitmap>();
-    images = new Map();
-    void decodeImages({
-      workspace: {
-        version: 1,
-        style: 'bento',
-        seed: 0,
-        background: '#fff',
-        layers: [],
-      },
-      assets,
-    })
+    void syncPreviews(previews, assets, previewEdge())
       .then((result) => {
-        decoded = result;
         if (alive) images = result;
-        else result.forEach((image) => image.close());
       })
       .catch(onerror);
     return () => {
       alive = false;
-      decoded.forEach((image) => image.close());
     };
+  });
+  onMount(() => () => {
+    void syncPreviews(previews, [], 0);
   });
   $effect(() => {
     if (!canvas) return;
@@ -163,7 +147,7 @@
     const scale = pixelScale;
     const frame = requestAnimationFrame(() => {
       try {
-        paint(current, sources, target, scale);
+        paint({ workspace: current, assets }, sources, target, scale);
       } catch (e) {
         onerror(e);
       }
@@ -258,11 +242,11 @@
         : Math.round(degrees);
     }
     if (g.kind === 'crop') {
-      const image = images.get(l.assetId);
-      if (!image) return;
+      const asset = assets.find((a) => a.id === l.assetId);
+      if (!asset) return;
       const crop = coverCrop(
-        image.width,
-        image.height,
+        asset.width,
+        asset.height,
         l.width,
         l.height,
         l.zoom,
@@ -275,7 +259,7 @@
         l.panX -
           ((to.x - from.x) * crop.width) /
             l.width /
-            (image.width - crop.width || Infinity),
+            (asset.width - crop.width || Infinity),
         0,
         1,
       );
@@ -283,7 +267,7 @@
         l.panY -
           ((to.y - from.y) * crop.height) /
             l.height /
-            (image.height - crop.height || Infinity),
+            (asset.height - crop.height || Infinity),
         0,
         1,
       );
