@@ -5,7 +5,6 @@
     layout,
     TEMPLATES,
     clamp,
-    swapPhotos,
     type Template,
     WIDTH,
     HEIGHT,
@@ -331,16 +330,31 @@
     style = workspace.style;
     scheduleSave();
   }
-  function swap() {
-    if (!layer || !workspace || !editing || busy) return;
-    const i = workspace.layers.findIndex((l) => l.id === selected);
-    commit(
-      swapPhotos(
-        workspace,
-        selected,
-        workspace.layers[(i + 1) % workspace.layers.length].id,
-      ),
-    );
+  const hasFiles = (e: DragEvent) => !!e.dataTransfer?.types.includes('Files');
+  const images = (files: FileList) =>
+    [...files].filter((f) => f.type.startsWith('image/'));
+  function pageDragOver(e: DragEvent) {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    const allowed = editing && !busy;
+    e.dataTransfer!.dropEffect = allowed ? 'copy' : 'none';
+    dragOver = allowed;
+  }
+  function pageDrop(e: DragEvent) {
+    if (!hasFiles(e)) return;
+    // Without this the browser navigates to the dropped file and leaves the editor.
+    e.preventDefault();
+    dragOver = false;
+    const files = images(e.dataTransfer!.files);
+    if (files.length) void add(files);
+  }
+  function pagePaste(e: ClipboardEvent) {
+    const t = e.target as HTMLElement | null;
+    if (t?.closest('input, textarea, [contenteditable]')) return;
+    const files = e.clipboardData ? images(e.clipboardData.files) : [];
+    if (!files.length) return;
+    e.preventDefault();
+    void add(files);
   }
   async function reset() {
     if (
@@ -384,6 +398,15 @@
     }
   }
 </script>
+
+<svelte:window
+  ondragover={pageDragOver}
+  ondragleave={(e) => {
+    if (!e.relatedTarget) dragOver = false;
+  }}
+  ondrop={pageDrop}
+  onpaste={pagePaste}
+/>
 
 <svelte:head
   ><title>Living Carousel — Make a little more of your memories</title><meta
@@ -484,9 +507,7 @@
           own.
         </p>
       {/if}
-      <div class="format-row">
-        <span>Portrait <b>4:5</b></span><span>3 slides</span>
-      </div>
+      <p class="format-row">Portrait 4:5 · 3 slides</p>
       <div class="sidebar-divider"></div>
       <div class="step-heading">
         <span class="step">02</span>
@@ -510,16 +531,6 @@
         class:drag-over={dragOver}
         disabled={!editing || busy}
         onclick={() => input.click()}
-        ondragover={(e) => {
-          e.preventDefault();
-          dragOver = true;
-        }}
-        ondragleave={() => (dragOver = false)}
-        ondrop={(e) => {
-          e.preventDefault();
-          dragOver = false;
-          if (e.dataTransfer) void add(e.dataTransfer.files);
-        }}
         ><span class="upload-plus">＋</span><strong
           >{busy ? 'Working on your collage…' : 'Drop in your photos'}</strong
         ><span>or click to browse</span><small
@@ -626,122 +637,115 @@
             class="icon-button"
             disabled={!canUndo || !editing || busy}
             onclick={undo}
-            aria-label="Undo">↶</button
+            aria-label="Undo"
+            ><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"
+              ><path d="M9 14 4 9l5-5M4 9h10.5a5.5 5.5 0 0 1 0 11H11" /></svg
+            ></button
           ><button
             class="icon-button"
             disabled={!canRedo || !editing || busy}
             onclick={redo}
-            aria-label="Redo">↷</button
+            aria-label="Redo"
+            ><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"
+              ><path d="m15 14 5-5-5-5m5 5H9.5a5.5 5.5 0 0 0 0 11H13" /></svg
+            ></button
           >
         </div>
         <span class="dimensions">1080 × 1350 px / slide</span>
       </div>
-      {#if workspace}
+      {#if workspace && layer}
         <div class="customize">
-          <div class="layer-picker" aria-label="Select a photo">
-            {#each workspace.layers as l, i (l.id)}<button
-                class:chosen={selected === l.id}
-                onclick={() => (selected = l.id)}
-                aria-label={`Edit photo ${i + 1}`}
-                aria-pressed={selected === l.id}
-                ><img src={urls[l.assetId]} alt="" /><span>{i + 1}</span
-                ></button
-              >{/each}
-          </div>
-          {#if layer}<fieldset disabled={!editing || busy}>
-              <legend
-                >Make photo {workspace.layers.indexOf(layer) + 1} yours</legend
+          <fieldset disabled={!editing || busy}>
+            <legend
+              >Make photo {workspace.layers.indexOf(layer) + 1} yours</legend
+            >
+            <div class="sliders">
+              <label
+                >Zoom<input
+                  aria-label="Photo zoom"
+                  type="range"
+                  min="1"
+                  max="3"
+                  step="0.05"
+                  value={layer.zoom}
+                  onchange={(e) => update('zoom', +e.currentTarget.value)}
+                /></label
+              ><label
+                >Horizontal crop<input
+                  aria-label="Horizontal crop"
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.01"
+                  value={layer.panX}
+                  onchange={(e) => update('panX', +e.currentTarget.value)}
+                /></label
+              ><label
+                >Vertical crop<input
+                  aria-label="Vertical crop"
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.01"
+                  value={layer.panY}
+                  onchange={(e) => update('panY', +e.currentTarget.value)}
+                /></label
               >
-              <div class="sliders">
+            </div>
+            {#if style === 'scrapbook'}
+              <div class="sliders precise-controls">
                 <label
-                  >Zoom<input
-                    aria-label="Photo zoom"
-                    type="range"
-                    min="1"
-                    max="3"
-                    step="0.05"
-                    value={layer.zoom}
-                    onchange={(e) => update('zoom', +e.currentTarget.value)}
+                  >Rotation <input
+                    aria-label="Photo rotation"
+                    type="number"
+                    min="-360"
+                    max="360"
+                    step="0.1"
+                    value={Math.round(layer.rotation * 10) / 10}
+                    onchange={(e) => update('rotation', +e.currentTarget.value)}
                   /></label
-                ><label
-                  >Horizontal crop<input
-                    aria-label="Horizontal crop"
-                    type="range"
-                    min="0"
-                    max="1"
-                    step="0.01"
-                    value={layer.panX}
-                    onchange={(e) => update('panX', +e.currentTarget.value)}
+                >
+                <label
+                  >Position X <input
+                    aria-label="Photo position X"
+                    type="number"
+                    value={Math.round(layer.x)}
+                    onchange={(e) => update('x', +e.currentTarget.value)}
                   /></label
-                ><label
-                  >Vertical crop<input
-                    aria-label="Vertical crop"
-                    type="range"
-                    min="0"
-                    max="1"
-                    step="0.01"
-                    value={layer.panY}
-                    onchange={(e) => update('panY', +e.currentTarget.value)}
+                >
+                <label
+                  >Position Y <input
+                    aria-label="Photo position Y"
+                    type="number"
+                    value={Math.round(layer.y)}
+                    onchange={(e) => update('y', +e.currentTarget.value)}
                   /></label
                 >
               </div>
-              {#if style === 'scrapbook'}
-                <div class="sliders precise-controls">
-                  <label
-                    >Rotation <input
-                      aria-label="Photo rotation"
-                      type="number"
-                      min="-360"
-                      max="360"
-                      step="0.1"
-                      value={Math.round(layer.rotation * 10) / 10}
-                      onchange={(e) =>
-                        update('rotation', +e.currentTarget.value)}
-                    /></label
-                  >
-                  <label
-                    >Position X <input
-                      aria-label="Photo position X"
-                      type="number"
-                      value={Math.round(layer.x)}
-                      onchange={(e) => update('x', +e.currentTarget.value)}
-                    /></label
-                  >
-                  <label
-                    >Position Y <input
-                      aria-label="Photo position Y"
-                      type="number"
-                      value={Math.round(layer.y)}
-                      onchange={(e) => update('y', +e.currentTarget.value)}
-                    /></label
-                  >
-                </div>
-                <div class="sliders precise-controls">
-                  <label
-                    >Photo width <input
-                      aria-label="Photo width"
-                      type="number"
-                      min="80"
-                      max={WIDTH * 3}
-                      value={Math.round(layer.width)}
-                      onchange={(e) => update('width', +e.currentTarget.value)}
-                    /></label
-                  >
-                  <label
-                    >Photo height <input
-                      aria-label="Photo height"
-                      type="number"
-                      min="80"
-                      max={HEIGHT * 2}
-                      value={Math.round(layer.height)}
-                      onchange={(e) => update('height', +e.currentTarget.value)}
-                    /></label
-                  >
-                </div>
-              {:else}<button class="text-button" onclick={swap}
-                  >Swap with next photo</button
-                >{/if}
-            </fieldset>{/if}
+              <div class="sliders precise-controls">
+                <label
+                  >Photo width <input
+                    aria-label="Photo width"
+                    type="number"
+                    min="80"
+                    max={WIDTH * 3}
+                    value={Math.round(layer.width)}
+                    onchange={(e) => update('width', +e.currentTarget.value)}
+                  /></label
+                >
+                <label
+                  >Photo height <input
+                    aria-label="Photo height"
+                    type="number"
+                    min="80"
+                    max={HEIGHT * 2}
+                    value={Math.round(layer.height)}
+                    onchange={(e) => update('height', +e.currentTarget.value)}
+                  /></label
+                >
+              </div>
+            {/if}
+          </fieldset>
         </div>
       {/if}
       <div class="export-bar">

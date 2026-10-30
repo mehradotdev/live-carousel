@@ -210,7 +210,9 @@ test('Scrapbook mouse editing supports move, resize, rotate, stacking, delete, r
   await page.keyboard.press('Escape');
   await page.mouse.up();
   expect((await saved(page)).workspace.layers).toEqual(beforeCancel);
-  await page.getByRole('button', { name: 'Edit photo 1', exact: true }).click();
+  const name = original.assets.find((a) => a.id === first.assetId)!.name;
+  await page.getByRole('button', { name: `Select ${name}`, exact: true }).click();
+  await expect(page.getByText('Make photo 1 yours')).toBeVisible();
   await page.getByRole('button', { name: 'Delete photo', exact: true }).click();
   project = await saved(page);
   expect(project.workspace.layers).toHaveLength(12);
@@ -219,7 +221,6 @@ test('Scrapbook mouse editing supports move, resize, rotate, stacking, delete, r
   expect((await saved(page)).workspace.layers).toHaveLength(13);
   await page.getByRole('button', { name: 'Redo', exact: true }).click();
   await saved(page);
-  const name = original.assets.find((a) => a.id === first.assetId)!.name;
   await page.getByRole('button', { name: `Add back ${name}`, exact: true }).click();
   expect((await saved(page)).workspace.layers).toHaveLength(13);
   const final = (await saved(page)).workspace;
@@ -445,4 +446,90 @@ test('Bento touch dragging shows a photo above the finger and swaps on release',
   } finally {
     await context.close();
   }
+});
+
+async function dispatchFiles(
+  page: Page,
+  kind: 'drop' | 'paste' | 'dragover' | 'dragleave',
+  count: number,
+  target = '.intro',
+) {
+  return page.evaluate(
+    async ({ kind, count, target }) => {
+      const data = new DataTransfer();
+      for (let i = 0; i < count; i++) {
+        const c = document.createElement('canvas');
+        c.width = c.height = 200 + i * 40;
+        c.getContext('2d')!.fillRect(0, 0, 10, 10);
+        const blob = await new Promise<Blob>((r) => c.toBlob((b) => r(b!)));
+        data.items.add(new File([blob], `${kind}-${i}.png`, { type: 'image/png' }));
+      }
+      const init = { bubbles: true, cancelable: true };
+      const event =
+        kind === 'paste'
+          ? new ClipboardEvent('paste', { ...init, clipboardData: data })
+          : new DragEvent(kind, { ...init, dataTransfer: data });
+      document.querySelector(target)!.dispatchEvent(event);
+      return event.defaultPrevented;
+    },
+    { kind, count, target },
+  );
+}
+test('photos dropped anywhere on the page or pasted are added without leaving the editor', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  expect(await dispatchFiles(page, 'drop', 2)).toBe(true);
+  await expect(page.locator('.count')).toHaveText('2/15');
+  expect(await dispatchFiles(page, 'paste', 1)).toBe(true);
+  await expect(page.locator('.photo-hit')).toHaveCount(3);
+  await expect(page).toHaveURL('/');
+  const upload = page.locator('button.upload');
+  await dispatchFiles(page, 'dragover', 1);
+  await expect(upload).toHaveClass(/drag-over/);
+  await dispatchFiles(page, 'drop', 1);
+  await expect(upload).not.toHaveClass(/drag-over/);
+  await expect(page.locator('.photo-hit')).toHaveCount(4);
+  await dispatchFiles(page, 'dragover', 1);
+  await expect(upload).toHaveClass(/drag-over/);
+  await dispatchFiles(page, 'dragleave', 1);
+  await expect(upload).not.toHaveClass(/drag-over/);
+  // Pastes into text fields belong to the field, not the photo library.
+  await page.evaluate(() => {
+    document.body.append(
+      Object.assign(document.createElement('textarea'), { id: 'paste-textarea' }),
+      Object.assign(document.createElement('input'), { id: 'paste-input' }),
+    );
+  });
+  expect(await dispatchFiles(page, 'paste', 1, '#paste-textarea')).toBe(false);
+  expect(await dispatchFiles(page, 'paste', 1, '#paste-input')).toBe(false);
+  await expect(page.locator('.count')).toHaveText('4/15');
+  await expect(page.locator('.photo-hit')).toHaveCount(4);
+});
+
+test('Bento arrow keys swap the selected photo with its neighbours and undo restores the order', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await upload(page, 3);
+  const before = (await saved(page)).workspace;
+  expect(before.style).toBe('bento');
+  const [a, b] = before.layers;
+  const first = page.locator(`[data-layer-id="${a.id}"]`);
+  await first.click();
+  await expect(
+    page.getByRole('group', { name: 'Interactive collage canvas' }),
+  ).toHaveAccessibleDescription(/arrow keys to swap/);
+  await page.keyboard.press('ArrowRight');
+  await expect(page.locator(`[data-layer-id="${b.id}"]`)).toHaveAttribute('aria-pressed', 'true');
+  let w = (await saved(page)).workspace;
+  expect(w.layers.map((l) => l.assetId)).toEqual([b.assetId, a.assetId, before.layers[2].assetId]);
+  await page.keyboard.press('ArrowLeft');
+  w = (await saved(page)).workspace;
+  expect(w.layers.map((l) => l.assetId)).toEqual(before.layers.map((l) => l.assetId));
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  expect((await saved(page)).workspace).toEqual(before);
 });

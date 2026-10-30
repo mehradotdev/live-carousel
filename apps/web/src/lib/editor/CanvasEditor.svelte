@@ -344,6 +344,20 @@
       remove();
     }
     if (
+      (event.key === 'ArrowLeft' || event.key === 'ArrowRight') &&
+      scene.style === 'bento'
+    ) {
+      event.preventDefault();
+      const n = workspace.layers.length;
+      const i = workspace.layers.findIndex((l) => l.id === selected);
+      const target =
+        workspace.layers[(i + (event.key === 'ArrowRight' ? 1 : n - 1)) % n].id;
+      // Swaps move photos between fixed slots, so follow the photo into its new slot.
+      oncommit(swapPhotos(workspace, selected, target));
+      selected = target;
+      return;
+    }
+    if (
       ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key) &&
       scene.style === 'scrapbook'
     ) {
@@ -390,7 +404,7 @@
   <p id="canvas-instructions">
     {scene.style === 'scrapbook'
       ? 'Drag photos to move · corners to resize · top handle to rotate'
-      : 'Drag a photo onto another to swap · drag a divider to resize cells'}
+      : 'Drag a photo onto another or use arrow keys to swap · drag a divider to resize cells'}
   </p>
   <div class="view-zoom">
     <button
