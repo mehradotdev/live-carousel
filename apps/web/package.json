@@ -1,0 +1,51 @@
+{
+  "name": "@living/web",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "imports": {
+    "#lib": "./src/lib/index.js",
+    "#lib/*": "./src/lib/*",
+    "#convex/*": "./src/convex/*"
+  },
+  "scripts": {
+    "dev": "vp dev",
+    "build": "vp build",
+    "preview": "vp preview",
+    "prepare": "svelte-kit sync",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+    "convex:dev": "convex dev",
+    "convex:deploy": "convex deploy"
+  },
+  "dependencies": {
+    "@convex-dev/better-auth": "0.12.6",
+    "@convex-dev/r2": "0.10.4",
+    "@convex-dev/resend": "0.2.10",
+    "@mmailaender/convex-better-auth-svelte": "0.10.0",
+    "better-auth": "1.6.33",
+    "convex": "1.48.0",
+    "convex-svelte": "0.15.1",
+    "fflate": "0.8.3",
+    "idb": "8.0.4"
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-auto": "8.0.0",
+    "@sveltejs/kit": "3.1.0",
+    "@sveltejs/vite-plugin-svelte": "7.3.1",
+    "@types/node": "26.6.5",
+    "convex-test": "0.0.66",
+    "svelte": "5.57.3",
+    "svelte-check": "4.7.7",
+    "typescript": "6.0.3",
+    "vite": "catalog:",
+    "vite-plus": "catalog:"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "12.16.1",
+      "onFail": "download"
+    }
+  }
+}

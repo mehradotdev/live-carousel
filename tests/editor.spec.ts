@@ -1,0 +1,448 @@
+import { expect, test, type Page } from '@playwright/test';
+import { unzipSync } from 'fflate';
+async function upload(page: Page, count = 6) {
+  const images = await page.evaluate(async (n) => {
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      const c = document.createElement('canvas');
+      c.width = i % 2 ? 360 : 240;
+      c.height = i % 2 ? 240 : 360;
+      const ctx = c.getContext('2d')!;
+      const g = ctx.createLinearGradient(0, 0, c.width, c.height);
+      g.addColorStop(0, ['#be9270', '#7d936b', '#7495a4', '#b88983', '#9685a1', '#c7ab6c'][i % 6]);
+      g.addColorStop(1, '#e6dfc4');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, c.width, c.height);
+      ctx.fillStyle = '#fff8';
+      ctx.beginPath();
+      ctx.arc(c.width / 2, c.height / 2, 65, 0, Math.PI * 2);
+      ctx.fill();
+      out.push(c.toDataURL().split(',')[1]);
+    }
+    return out;
+  }, count);
+  await page.getByLabel('Upload photos').setInputFiles(
+    images.map((data, i) => ({
+      name: `photo-${i}.png`,
+      mimeType: 'image/png',
+      buffer: Buffer.from(data, 'base64'),
+    })),
+  );
+  await expect(page.locator('.photo-hit')).toHaveCount(count);
+}
+test('guest creates, crops, undoes, restores and exports three full-resolution slides', async ({
+  page,
+}) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await upload(page);
+  await expect(page.getByLabel('Your continuous three-slide collage')).toBeVisible();
+  await page.getByLabel('Photo zoom').fill('2');
+  await expect(page.getByLabel('Photo zoom')).toHaveValue('2');
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expect(page.getByLabel('Photo zoom')).toHaveValue('1');
+  await page.getByRole('button', { name: 'Redo', exact: true }).click();
+  await expect(page.getByLabel('Photo zoom')).toHaveValue('2');
+  await expect(page.getByRole('status').filter({ hasText: 'Saved on this device' })).toBeVisible();
+  await page.reload();
+  await expect(page.getByLabel('Photo zoom')).toHaveValue('2');
+  const downloaded = page.waitForEvent('download');
+  await page.getByRole('button', { name: /Download images/ }).click();
+  const stream = await (await downloaded).createReadStream();
+  const chunks = [];
+  for await (const c of stream!) chunks.push(c);
+  const files = unzipSync(Buffer.concat(chunks));
+  expect(Object.keys(files)).toHaveLength(3);
+  for (const png of Object.values(files)) {
+    const bytes = Buffer.from(png);
+    expect(bytes.readUInt32BE(16)).toBe(1080);
+    expect(bytes.readUInt32BE(20)).toBe(1350);
+  }
+  expect(errors).toEqual([]);
+  await page.screenshot({ path: 'test-results/editor-desktop.png', fullPage: true });
+});
+test('single editing tab hands ownership over without losing the workspace', async ({
+  page,
+  context,
+}) => {
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await upload(page, 3);
+  await expect(page.getByLabel('Your continuous three-slide collage')).toBeVisible();
+  const second = await context.newPage();
+  await second.goto('/');
+  await expect(second.getByLabel('Upload photos')).toBeDisabled();
+  await second.getByRole('button', { name: 'Edit here', exact: true }).click();
+  await expect(second.getByLabel('Upload photos')).toBeEnabled();
+  await expect(page.getByLabel('Upload photos')).toBeDisabled();
+  await expect(second.getByLabel('Your continuous three-slide collage')).toBeVisible();
+});
+test('unsupported files fail visibly and mobile layout stays within the viewport', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await page
+    .getByLabel('Upload photos')
+    .setInputFiles({ name: 'photo.heic', mimeType: 'image/heic', buffer: Buffer.from('invalid') });
+  await expect(page.getByRole('alert')).toContainText('use JPEG, PNG or WebP');
+  await upload(page, 3);
+  await page.getByRole('button', { name: /Scrapbook/ }).click();
+  await expect(page.getByLabel('Your continuous three-slide collage')).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: 'test-results/editor-mobile.png', fullPage: true });
+});
+
+test('auth proxy resolves guest sessions and invalid links preserve the local collage', async ({
+  page,
+  request,
+}) => {
+  const session = await request.get('/api/auth/get-session');
+  expect([200, 503]).toContain(session.status());
+  if (session.status() === 200) expect(await session.json()).toBeNull();
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await upload(page, 3);
+  await expect(page.getByRole('status').filter({ hasText: 'Saved on this device' })).toBeVisible();
+  await page.goto('/?sign_in_error=1');
+  await expect(page.getByRole('alert')).toContainText('invalid or expired');
+  await expect(page.getByLabel('Your continuous three-slide collage')).toBeVisible();
+  if (session.status() === 200) {
+    await expect(page.getByLabel('Email address', { exact: true })).toBeVisible();
+    await page.route('**/api/auth/sign-in/magic-link', (route) =>
+      route.fulfill({
+        status: 429,
+        contentType: 'application/json',
+        body: JSON.stringify({ message: 'Too many requests' }),
+      }),
+    );
+    await page.getByLabel('Email address', { exact: true }).fill('test@example.com');
+    await page.getByRole('button', { name: 'Email me a sign-in link' }).click();
+    await expect(page.locator('.auth-error')).toContainText('wait a minute');
+    await expect(page.getByLabel('Your continuous three-slide collage')).toBeVisible();
+  }
+});
+
+async function saved(page: Page) {
+  await expect(page.getByRole('status').filter({ hasText: 'Saved on this device' })).toBeVisible();
+  return page.evaluate(async () => {
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const r = indexedDB.open('living-carousel', 1);
+      r.onsuccess = () => resolve(r.result);
+      r.onerror = () => reject(r.error);
+    });
+    try {
+      const project = await new Promise<{
+        workspace: import('../apps/web/src/lib/editor/model').Workspace;
+        assets: { id: string; name: string }[];
+      }>((resolve) => {
+        const r = db.transaction('project').objectStore('project').get('active');
+        r.onsuccess = () => resolve(r.result);
+      });
+      return {
+        workspace: project.workspace,
+        assets: project.assets.map((a) => ({ id: a.id, name: a.name })),
+      };
+    } finally {
+      db.close();
+    }
+  });
+}
+async function drag(page: Page, selector: string, dx: number, dy: number) {
+  const target = page.locator(selector);
+  await target.scrollIntoViewIfNeeded();
+  const b = (await target.boundingBox())!;
+  await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(b.x + b.width / 2 + dx, b.y + b.height / 2 + dy, { steps: 12 });
+  await page.mouse.up();
+}
+test('Scrapbook mouse editing supports move, resize, rotate, stacking, delete, restore and one-step undo', async ({
+  page,
+}) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await upload(page, 13);
+  await page.getByRole('button', { name: /Scrapbook/ }).click();
+  const original = await saved(page);
+  const first = original.workspace.layers[0];
+  const selector = `[data-layer-id="${first.id}"]`;
+  await drag(page, selector, 95, 35);
+  let project = await saved(page);
+  expect(project.workspace.layers.find((l) => l.id === first.id)!.x).toBeGreaterThan(first.x + 100);
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  expect((await saved(page)).workspace.layers).toEqual(original.workspace.layers);
+  await page.getByRole('button', { name: 'Redo', exact: true }).click();
+  await saved(page);
+  const beforeResize = (await saved(page)).workspace.layers.find((l) => l.id === first.id)!;
+  await drag(page, '[aria-label="Resize photo se"]', 35, 25);
+  project = await saved(page);
+  expect(project.workspace.layers.find((l) => l.id === first.id)!.width).toBeGreaterThan(
+    beforeResize.width,
+  );
+  const beforeRotate = project.workspace.layers.find((l) => l.id === first.id)!.rotation;
+  await drag(page, '[aria-label="Rotate photo"]', 50, 15);
+  project = await saved(page);
+  expect(
+    Math.abs(project.workspace.layers.find((l) => l.id === first.id)!.rotation - beforeRotate),
+  ).toBeGreaterThan(10);
+  await page.getByRole('button', { name: 'Bring to front', exact: true }).click();
+  expect((await saved(page)).workspace.layers.at(-1)!.id).toBe(first.id);
+  await page.getByRole('button', { name: 'Send to back', exact: true }).click();
+  expect((await saved(page)).workspace.layers[0].id).toBe(first.id);
+  await page.getByRole('button', { name: 'Bring forward', exact: true }).click();
+  expect((await saved(page)).workspace.layers[1].id).toBe(first.id);
+  await page.getByRole('button', { name: 'Send backward', exact: true }).click();
+  expect((await saved(page)).workspace.layers[0].id).toBe(first.id);
+  const beforeCancel = (await saved(page)).workspace.layers;
+  const hit = page.locator(selector);
+  await hit.scrollIntoViewIfNeeded();
+  const box = (await hit.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2 + 50, box.y + box.height / 2 + 20, { steps: 5 });
+  await page.keyboard.press('Escape');
+  await page.mouse.up();
+  expect((await saved(page)).workspace.layers).toEqual(beforeCancel);
+  await page.getByRole('button', { name: 'Edit photo 1', exact: true }).click();
+  await page.getByRole('button', { name: 'Delete photo', exact: true }).click();
+  project = await saved(page);
+  expect(project.workspace.layers).toHaveLength(12);
+  expect(project.assets).toHaveLength(13);
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  expect((await saved(page)).workspace.layers).toHaveLength(13);
+  await page.getByRole('button', { name: 'Redo', exact: true }).click();
+  await saved(page);
+  const name = original.assets.find((a) => a.id === first.assetId)!.name;
+  await page.getByRole('button', { name: `Add back ${name}`, exact: true }).click();
+  expect((await saved(page)).workspace.layers).toHaveLength(13);
+  const final = (await saved(page)).workspace;
+  await page.reload();
+  await expect(page.locator('.photo-hit')).toHaveCount(13);
+  expect((await saved(page)).workspace).toEqual(final);
+  expect(errors).toEqual([]);
+  await page.screenshot({ path: 'test-results/scrapbook-interactive.png', fullPage: true });
+});
+test('Bento templates change geometry, mouse swaps preserve slots, and shared borders resize without gaps', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await upload(page, 13);
+  const initial = (await saved(page)).workspace;
+  await page.getByLabel('Bento template').selectOption('editorial');
+  let w = (await saved(page)).workspace;
+  expect(w.layers.map((l) => [l.x, l.y, l.width, l.height])).not.toEqual(
+    initial.layers.map((l) => [l.x, l.y, l.width, l.height]),
+  );
+  const [a, b] = w.layers;
+  const src = page.locator(`[data-layer-id="${a.id}"]`);
+  const dst = page.locator(`[data-layer-id="${b.id}"]`);
+  await src.scrollIntoViewIfNeeded();
+  const s = (await src.boundingBox())!;
+  const t = (await dst.boundingBox())!;
+  await page.mouse.move(s.x + s.width / 2, s.y + s.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(t.x + t.width / 2, t.y + t.height / 2, { steps: 15 });
+  const ghost = page.locator('.swap-ghost');
+  await expect(ghost).toBeVisible();
+  await expect(ghost).toContainText('Release to swap');
+  await expect(ghost.locator('canvas')).toHaveAttribute('data-asset-id', a.assetId);
+  await expect(src).toHaveClass(/drag-source/);
+  await expect(dst).toHaveClass(/drop-target/);
+  expect(
+    await ghost.locator('canvas').evaluate((canvas) => {
+      const c = canvas as HTMLCanvasElement;
+      return (
+        c.width > 0 &&
+        c
+          .getContext('2d')!
+          .getImageData(0, 0, c.width, c.height)
+          .data.some((v, i) => i % 4 === 3 && v > 0)
+      );
+    }),
+  ).toBe(true);
+  const previewStyle = await ghost.locator('canvas').evaluate((c) => ({
+    opacity: getComputedStyle(c).opacity,
+    filter: getComputedStyle(c).filter,
+  }));
+  expect(+previewStyle.opacity).toBeLessThan(1);
+  expect(previewStyle.filter).toContain('grayscale');
+  await page.screenshot({ path: 'test-results/bento-drag-preview.png' });
+  await page.mouse.up();
+  await expect(ghost).toHaveCount(0);
+  w = (await saved(page)).workspace;
+  expect(w.layers[0].assetId).toBe(b.assetId);
+  expect(w.layers[1].assetId).toBe(a.assetId);
+  expect(w.layers[0].x).toBe(a.x);
+  expect(w.layers[0].width).toBe(a.width);
+  const beforeResize = w;
+  const root = page.getByRole('button', { name: 'Resize vertical divider root', exact: true });
+  await root.scrollIntoViewIfNeeded();
+  await drag(page, '[aria-label="Resize vertical divider root"]', 45, 0);
+  w = (await saved(page)).workspace;
+  expect(w.layers.map((l) => l.width)).not.toEqual(beforeResize.layers.map((l) => l.width));
+  for (let i = 0; i < w.layers.length; i++)
+    for (let j = i + 1; j < w.layers.length; j++) {
+      const x = w.layers[i],
+        y = w.layers[j];
+      expect(
+        Math.min(
+          Math.min(x.x + x.width, y.x + y.width) - Math.max(x.x, y.x),
+          Math.min(x.y + x.height, y.y + y.height) - Math.max(x.y, y.y),
+        ),
+      ).toBeLessThanOrEqual(0.001);
+    }
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  expect((await saved(page)).workspace).toEqual(beforeResize);
+  await page.getByRole('button', { name: 'Redo', exact: true }).click();
+  const final = (await saved(page)).workspace;
+  await page.reload();
+  expect((await saved(page)).workspace).toEqual(final);
+  const fontSizes = await page
+    .locator('.upload strong, .sliders label, .primary, .save-status')
+    .evaluateAll((nodes) => nodes.map((n) => parseFloat(getComputedStyle(n).fontSize)));
+  expect(Math.min(...fontSizes)).toBeGreaterThanOrEqual(14);
+  await page.screenshot({ path: 'test-results/bento-interactive.png', fullPage: true });
+});
+
+test('transformed Scrapbook exports match the continuous composition pixel for pixel at slide seams', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await upload(page, 3);
+  await page.getByRole('button', { name: /Scrapbook/ }).click();
+  await saved(page);
+  await page.getByLabel('Photo position X', { exact: true }).fill('900');
+  await page.getByLabel('Photo position X', { exact: true }).press('Tab');
+  await page.getByLabel('Photo rotation', { exact: true }).fill('27');
+  await page.getByLabel('Photo rotation', { exact: true }).press('Tab');
+  await saved(page);
+  const pending = page.waitForEvent('download');
+  await page.getByRole('button', { name: /Download images/ }).click();
+  const stream = await (await pending).createReadStream();
+  const chunks = [];
+  for await (const c of stream!) chunks.push(c);
+  const files = unzipSync(Buffer.concat(chunks));
+  const slides = Object.keys(files)
+    .sort()
+    .map((name) => Buffer.from(files[name]).toString('base64'));
+  const differences = await page.evaluate(async (encoded) => {
+    const request = indexedDB.open('living-carousel', 1);
+    const db = await new Promise<IDBDatabase>(
+      (resolve) => (request.onsuccess = () => resolve(request.result)),
+    );
+    const project = await new Promise<import('../apps/web/src/lib/editor/model').Project>(
+      (resolve) => {
+        const r = db.transaction('project').objectStore('project').get('active');
+        r.onsuccess = () => resolve(r.result);
+      },
+    );
+    db.close();
+    const path = '/src/lib/editor/render.ts';
+    const renderer = await import(path);
+    const wide = document.createElement('canvas');
+    await renderer.draw(project, wide, 1);
+    const result = [];
+    for (let i = 0; i < encoded.length; i++) {
+      const blob = await (await fetch('data:image/png;base64,' + encoded[i])).blob();
+      const image = await createImageBitmap(blob);
+      const canvas = document.createElement('canvas');
+      canvas.width = 1080;
+      canvas.height = 1350;
+      const ctx = canvas.getContext('2d')!;
+      ctx.drawImage(image, 0, 0);
+      image.close();
+      const actual = ctx.getImageData(0, 0, 1080, 1350).data;
+      const expected = wide.getContext('2d')!.getImageData(i * 1080, 0, 1080, 1350).data;
+      let mismatch = 0;
+      for (let p = 0; p < actual.length; p++) if (Math.abs(actual[p] - expected[p]) > 1) mismatch++;
+      result.push(mismatch);
+    }
+    return result;
+  }, slides);
+  expect(differences).toEqual([0, 0, 0]);
+});
+test('legacy workspaces retain their photos and transforms until a new Bento template is chosen', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await upload(page, 6);
+  const original = await saved(page);
+  await page.evaluate(async () => {
+    const r = indexedDB.open('living-carousel', 1);
+    const db = await new Promise<IDBDatabase>((resolve) => (r.onsuccess = () => resolve(r.result)));
+    await new Promise<void>((resolve) => {
+      const tx = db.transaction('project', 'readwrite');
+      const store = tx.objectStore('project');
+      const get = store.get('active');
+      get.onsuccess = () => {
+        const p = get.result;
+        delete p.workspace.bento;
+        delete p.workspace.template;
+        store.put(p, 'active');
+      };
+      tx.oncomplete = () => resolve();
+    });
+    db.close();
+  });
+  await page.reload();
+  await expect(page.getByLabel('Bento template')).toHaveValue('');
+  const restored = await saved(page);
+  expect(restored.workspace.layers).toEqual(original.workspace.layers);
+  expect(restored.assets).toEqual(original.assets);
+  await page.getByLabel('Bento template').selectOption('mosaic');
+  await expect(page.locator('.divider-handle')).toHaveCount(5);
+  expect((await saved(page)).assets).toEqual(original.assets);
+});
+
+test('Bento touch dragging shows a photo above the finger and swaps on release', async ({
+  browser,
+}) => {
+  const context = await browser.newContext({
+    hasTouch: true,
+    viewport: { width: 390, height: 844 },
+  });
+  const page = await context.newPage();
+  try {
+    await page.goto('http://127.0.0.1:5173/');
+    await expect(page.getByLabel('Upload photos')).toBeEnabled();
+    await upload(page, 3);
+    const before = (await saved(page)).workspace;
+    const [a, b] = before.layers;
+    const source = page.locator(`[data-layer-id="${a.id}"]`);
+    const target = page.locator(`[data-layer-id="${b.id}"]`);
+    await source.scrollIntoViewIfNeeded();
+    const s = (await source.boundingBox())!;
+    const t = (await target.boundingBox())!;
+    const x = t.x + t.width / 2,
+      y = t.y + t.height / 2;
+    const cdp = await context.newCDPSession(page);
+    await cdp.send('Input.dispatchTouchEvent', {
+      type: 'touchStart',
+      touchPoints: [{ x: s.x + s.width / 2, y: s.y + s.height / 2 }],
+    });
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x, y }] });
+    const ghost = page.locator('.swap-ghost');
+    await expect(ghost).toBeVisible();
+    await expect(ghost).toContainText('Release to swap');
+    const box = (await ghost.boundingBox())!;
+    expect(box.y + box.height).toBeLessThan(y);
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await expect(ghost).toHaveCount(0);
+    const after = (await saved(page)).workspace;
+    expect(after.layers[0].assetId).toBe(b.assetId);
+    expect(after.layers[1].assetId).toBe(a.assetId);
+  } finally {
+    await context.close();
+  }
+});
