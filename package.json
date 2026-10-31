@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "vp -C apps/web dev",
     "build": "vp -C apps/web build",
+    "deploy": "pnpm --filter @living/web run deploy",
     "check": "vp check && pnpm --filter @living/web check && eslint apps/web/src && prettier --check \"apps/**/*.svelte\"",
     "format": "vp fmt && prettier --write \"apps/**/*.svelte\"",
     "test": "vp test run",
