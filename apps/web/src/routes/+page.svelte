@@ -76,7 +76,7 @@
   let dragOver = $state(false);
   let format = $state<'png' | 'jpeg'>('png');
   let shareFiles = $state.raw<File[] | null>(null);
-  let unreadable = false;
+  let unreadable = $state(false);
   let channel: BroadcastChannel | undefined;
   let release: (() => void) | undefined;
   let saveQueue = Promise.resolve();
@@ -1179,6 +1179,7 @@
           <select
             class="select h-auto min-h-[42px] w-auto border-primary/20 bg-base-200 text-sm text-neutral/90"
             aria-label="Export image format"
+            disabled={busy}
             bind:value={format}
             ><option value="png">PNG</option><option value="jpeg">JPEG</option
             ></select
@@ -1455,7 +1456,9 @@
         onclick={exportBackup}>Download project backup</button
       ><button
         class="ml-3 px-1.5 py-px text-neutral/90"
-        disabled={(!assets.length && !workspace.overlays.length) ||
+        disabled={(!assets.length &&
+          !workspace.overlays.length &&
+          !unreadable) ||
           !editing ||
           busy}
         onclick={reset}>New collage</button

@@ -749,6 +749,8 @@ test('an unreadable saved collage shows an error and is not overwritten by autos
   await page.evaluate(() => window.dispatchEvent(new Event('pagehide')));
   await page.waitForTimeout(300);
   expect(await record(false)).toEqual([null]);
+  // The error tells the user to start a new collage, so that button must work with nothing loaded.
+  await expect(page.getByRole('button', { name: 'New collage' })).toBeEnabled();
 });
 
 async function exported(page: Page) {
