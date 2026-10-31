@@ -91,7 +91,7 @@ No global CLI is needed for these integrations. The project-local Convex CLI man
 
 The web app uses `@sveltejs/adapter-cloudflare` and the pinned project-local Wrangler. `apps/web/wrangler.jsonc` points the Worker at `.svelte-kit/cloudflare/_worker.js` with static assets from `.svelte-kit/cloudflare`. Do not use `npx wrangler`: npm fails the `devEngines` pnpm check.
 
-Workers Builds settings (Worker name must match `name` in `apps/web/wrangler.jsonc`, `living-carousel`):
+Workers Builds settings (Worker name must match `name` in `apps/web/wrangler.jsonc`, `live-carousel`):
 
 | Setting        | Value             |
 | -------------- | ----------------- |
@@ -101,7 +101,7 @@ Workers Builds settings (Worker name must match `name` in `apps/web/wrangler.jso
 
 Build variables (inlined at build time, so set them under Build, not as runtime Worker variables): `PUBLIC_CONVEX_URL` and `PUBLIC_CONVEX_SITE_URL` of the production Convex deployment. Node comes from `.node-version`; set `PNPM_VERSION=12.16.1` if the build image ignores `packageManager`. No secrets belong on the Worker; credentials stay in Convex.
 
-After the first deploy, set Convex `SITE_URL` on that deployment to the exact Worker origin (for example `https://living-carousel.<subdomain>.workers.dev` or a custom domain) and add that origin to the R2 CORS policy. Locally, `pnpm build && pnpm run deploy --dry-run` validates the bundle without uploading; `pnpm --filter @living/web exec wrangler dev` serves the built Worker.
+After the first deploy, set Convex `SITE_URL` on that deployment to the exact Worker origin (for example `https://live-carousel.<subdomain>.workers.dev` or a custom domain) and add that origin to the R2 CORS policy. Locally, `pnpm build && pnpm run deploy --dry-run` validates the bundle without uploading; `pnpm --filter @living/web exec wrangler dev` serves the built Worker.
 
 ### Remaining paid workflow
 
