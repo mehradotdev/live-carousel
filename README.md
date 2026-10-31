@@ -15,17 +15,18 @@ Open http://localhost:5173. No API keys are needed for the free editor; email si
 
 ## Available now
 
-- Three 1080×1350 portrait slides on one continuous logical canvas.
-- Four Bento template families (Mosaic, Editorial, Balanced, Panorama), geometric shuffle variations, drag-to-swap and shared-divider resizing with minimum cell sizes.
+- 1–20 slides on one continuous logical canvas, all 1080px wide: 4:5, 3:4, 1:1 or 9:16.
+- Four Bento template families (Mosaic, Editorial, Balanced, Panorama), geometric shuffle variations, drag-to-swap, shared-divider resizing, deleting and adding cells with minimum cell sizes, plus gap, margin, roundness and background color.
 - Freeform Scrapbook photos: mouse dragging across slide seams, corner resizing, rotation handle, deletion, and forward/backward/front/back stacking.
+- Text layers with six bundled fonts, and emoji stickers, shared by both styles. Bento and Scrapbook layouts are stored separately, so switching style loses nothing.
 - Crop mode (double-click or Crop photo), crop/zoom controls, precise numeric transforms, and undo/redo. One mouse gesture creates one undo entry; Escape cancels an in-progress gesture.
-- Canvas zoom and horizontal scrolling. Keyboard arrows move a selected Scrapbook photo (Shift for larger steps); Delete removes it. Original photos remain in the library and can be added back.
-- JPEG, PNG and WebP input (initially 3–15 photos, 20 MB and 40 megapixels per photo). After creating a collage, Scrapbook photos can be intentionally deleted down to an empty canvas; originals remain in the library.
-- Transactional IndexedDB saves with original image blobs, reload restoration and exclusive-tab ownership with cooperative takeover.
-- PNG or JPEG slides packaged in a ZIP; a project backup ZIP containing JSON and original assets.
+- Canvas zoom toward the cursor, pinch, panning and a numbered slide strip. Keyboard arrows move a selected Scrapbook photo (Shift for larger steps); Delete removes it. Original photos remain in the library and can be added back.
+- JPEG, PNG and WebP input (0–100 photos, 20 MB and 40 megapixels per photo). Each upload is decoded once into an immutable master (≤4096px, metadata stripped) and a 1440px editing preview; the uploaded file is not kept. Scrapbook photos can be intentionally deleted down to an empty canvas; masters remain in the library.
+- Transactional IndexedDB saves (photos written once, workspace on every change), reload restoration and exclusive-tab ownership with cooperative takeover.
+- PNG or JPEG slides rendered one slide at a time from masters: a ZIP on desktop, the share sheet on touch devices that can share files; a project backup ZIP containing JSON and master images.
 - Responsive desktop/mobile layouts and keyboard-accessible form controls.
 
-The project backup is an archive; importing backups is not implemented. Storage is per browser and can be cleared or evicted. Files stay local. The page currently loads typography from Google Fonts; it does not send photo data there.
+The project backup is an archive; importing backups is not implemented. Storage is per browser and can be cleared or evicted. Files stay local. Fonts are served from the app.
 
 ## Quality checks
 
@@ -94,7 +95,7 @@ Next: validate R2 PUT/finalization/download/deletion against the private bucket,
 
 ## Known limits
 
-Shared Bento dividers preserve the layout partition; arbitrary cell split/merge and multi-selection are not implemented. Existing saved layouts retain their transforms; choose a new Bento template to enable shared dividers on a legacy layout. No paid AI/video flow, native mobile app, social publishing, cloud sync, or multi-project dashboard yet. Browser tests currently cover Chromium; Safari/iOS and Android hardware testing remains outstanding. Fast tab closure before a pending IndexedDB save completes can lose the latest edits; wait for Saved or export first. Adapter-auto supports local validation; select the deployment adapter when wiring the hosting environment.
+Shared Bento dividers preserve the layout partition; arbitrary cell merge and multi-selection are not implemented. No paid AI/video flow, native mobile app, social publishing, cloud sync, or multi-project dashboard yet. Browser tests currently cover Chromium; Safari/iOS and Android hardware testing remains outstanding. Fast tab closure before a pending IndexedDB save completes can lose the latest edits; wait for Saved or export first. Adapter-auto supports local validation; select the deployment adapter when wiring the hosting environment.
 
 ## License
 

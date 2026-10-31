@@ -3,7 +3,9 @@ import {
   layout,
   coverCrop,
   WIDTH,
-  HEIGHT,
+  ASPECTS,
+  slideSize,
+  resize,
   dividers,
   resizeDivider,
   resizeLayer,
@@ -12,26 +14,62 @@ import {
   swapPhotos,
   TEMPLATES,
   MIN_TILE,
+  BENTO_PER_SLIDE,
+  GRAB,
+  keepOnCanvas,
+  activeLayers,
+  addPhotos,
+  addToBento,
+  applyBento,
+  regenerate,
+  removeAsset,
+  removeLayer,
+  setSpacing,
+  newText,
+  stack,
+  fitTextBox,
+  resizeTextWidth,
+  textLines,
+  updateLayer,
+  wrapText,
+  emojiError,
+  isEmojiOnly,
+  MAX_EMOJI,
+  newEmoji,
+  TEXT_MIN_WIDTH,
   type Asset,
+  type BentoNode,
   type Workspace,
 } from './model';
 const assets = Array.from({ length: 6 }, (_, i) => ({ id: String(i) }) as Asset);
 describe('collage geometry', () => {
-  it('rejects an empty layout and supports intentional deletion down to one photo', () => {
-    expect(() => layout([], 'bento')).toThrow();
-    expect(layout(assets.slice(0, 1), 'bento').layers).toHaveLength(1);
+  it('derives 1080-wide slide sizes from the aspect', () => {
+    expect(Object.keys(ASPECTS).map((a) => slideSize(a as keyof typeof ASPECTS))).toEqual([
+      { width: 1080, height: 1350 },
+      { width: 1080, height: 1440 },
+      { width: 1080, height: 1080 },
+      { width: 1080, height: 1920 },
+    ]);
+  });
+  it('lays out zero photos as background only and supports a single photo', () => {
+    for (const style of ['bento', 'scrapbook'] as const) {
+      const empty = layout([], style);
+      expect(activeLayers(empty)).toEqual([]);
+      expect(empty.bento.tree).toBeUndefined();
+    }
+    expect(layout(assets.slice(0, 1), 'bento').bento.layers).toHaveLength(1);
   });
   it('uses every source once and keeps Bento tiles inside the global scene', () => {
     for (let n = 3; n <= 15; n++) {
       const input = Array.from({ length: n }, (_, i) => ({ id: String(i) }) as Asset);
       for (let seed = 0; seed < 3; seed++) {
-        const w = layout(input, 'bento', seed);
-        expect(new Set(w.layers.map((l) => l.assetId)).size).toBe(n);
-        for (const l of w.layers) {
+        const { layers } = layout(input, 'bento', seed).bento;
+        expect(new Set(layers.map((l) => l.assetId)).size).toBe(n);
+        for (const l of layers) {
           expect(l.x).toBeGreaterThanOrEqual(0);
           expect(l.y).toBeGreaterThanOrEqual(0);
           expect(l.x + l.width).toBeLessThanOrEqual(WIDTH * 3);
-          expect(l.y + l.height).toBeLessThanOrEqual(HEIGHT);
+          expect(l.y + l.height).toBeLessThanOrEqual(1350);
         }
       }
     }
@@ -58,10 +96,11 @@ describe('collage geometry', () => {
 });
 
 function noOverlap(w: Workspace) {
-  for (let i = 0; i < w.layers.length; i++)
-    for (let j = i + 1; j < w.layers.length; j++) {
-      const a = w.layers[i];
-      const b = w.layers[j];
+  const layers = activeLayers(w);
+  for (let i = 0; i < layers.length; i++)
+    for (let j = i + 1; j < layers.length; j++) {
+      const a = layers[i];
+      const b = layers[j];
       const overlapX = Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x);
       const overlapY = Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y);
       expect(Math.min(overlapX, overlapY)).toBeLessThanOrEqual(0.001);
@@ -71,7 +110,7 @@ it('produces distinct geometric templates and gap-free shared partitions for 3�
   const geometries = new Set(
     TEMPLATES.map((t) =>
       JSON.stringify(
-        layout(assets, 'bento', 0, t).layers.map((l) => [l.x, l.y, l.width, l.height]),
+        layout(assets, 'bento', 0, t).bento.layers.map((l) => [l.x, l.y, l.width, l.height]),
       ),
     ),
   );
@@ -86,8 +125,10 @@ it('produces distinct geometric templates and gap-free shared partitions for 3�
           for (const pos of [d.min - 1000, d.position + 50, d.max + 1000]) {
             const next = resizeDivider(w, d.path, pos);
             noOverlap(next);
-            expect(next.layers.map((l) => l.assetId)).toEqual(w.layers.map((l) => l.assetId));
-            for (const l of next.layers) {
+            expect(next.bento.layers.map((l) => l.assetId)).toEqual(
+              w.bento.layers.map((l) => l.assetId),
+            );
+            for (const l of next.bento.layers) {
               expect(l.width).toBeGreaterThanOrEqual(MIN_TILE - 0.001);
               expect(l.height).toBeGreaterThanOrEqual(MIN_TILE - 0.001);
             }
@@ -97,7 +138,7 @@ it('produces distinct geometric templates and gap-free shared partitions for 3�
 });
 it('resizes rotated photos about the opposite corner without changing aspect ratio', () => {
   const l = {
-    ...layout(assets, 'scrapbook').layers[0],
+    ...layout(assets, 'scrapbook').scrapbook.layers[0],
     x: 500,
     y: 300,
     width: 400,
@@ -110,7 +151,7 @@ it('resizes rotated photos about the opposite corner without changing aspect rat
     y: a.y + a.height / 2 - (a.width / 2) * Math.sin(angle) - (a.height / 2) * Math.cos(angle),
   });
   const before = anchor(l);
-  const next = resizeLayer(l, { x: 1200, y: 1100 }, 'se');
+  const next = resizeLayer(l, { x: 1200, y: 1100 }, 'se', { width: 3240, height: 1350 });
   const after = anchor(next);
   expect(next.width / next.height).toBeCloseTo(400 / 600);
   expect(after.x).toBeCloseTo(before.x);
@@ -118,20 +159,499 @@ it('resizes rotated photos about the opposite corner without changing aspect rat
 });
 it('swaps image content and crops while preserving cells; stacking affects hit testing', () => {
   const w = layout(assets, 'bento');
-  const [a, b] = w.layers;
+  const [a, b] = w.bento.layers;
   a.zoom = 2;
   const swapped = swapPhotos(w, a.id, b.id);
-  expect(swapped.layers[0].assetId).toBe(b.assetId);
-  expect(swapped.layers[1].zoom).toBe(2);
-  expect(swapped.layers[0].x).toBe(a.x);
+  expect(swapped.bento.layers[0].assetId).toBe(b.assetId);
+  expect(swapped.bento.layers[1].zoom).toBe(2);
+  expect(swapped.bento.layers[0].x).toBe(a.x);
   const scrap = {
     ...w,
     style: 'scrapbook' as const,
-    layers: [
-      { ...a, x: 100, y: 100, width: 400, height: 400, rotation: 0 },
-      { ...b, x: 100, y: 100, width: 400, height: 400, rotation: 45 },
-    ],
+    scrapbook: {
+      order: [],
+      layers: [
+        { ...a, x: 100, y: 100, width: 400, height: 400, rotation: 0 },
+        { ...b, x: 100, y: 100, width: 400, height: 400, rotation: 45 },
+      ],
+    },
   };
-  expect(hitLayer(scrap, { x: 300, y: 300 })?.id).toBe(b.id);
-  expect(hitLayer(reorderLayer(scrap, b.id, 'back'), { x: 300, y: 300 })?.id).toBe(a.id);
+  expect(hitLayer(stack(scrap), { x: 300, y: 300 })?.id).toBe(b.id);
+  expect(hitLayer(stack(reorderLayer(scrap, b.id, 'back')), { x: 300, y: 300 })?.id).toBe(a.id);
+});
+describe('aspect and slide-count changes', () => {
+  const center = (l: { x: number; y: number; width: number; height: number }) => ({
+    x: l.x + l.width / 2,
+    y: l.y + l.height / 2,
+  });
+  it('Bento rebuilds the full strip keeping photo order and crops', () => {
+    const w = layout(assets, 'bento', 2);
+    w.bento.layers[0] = { ...w.bento.layers[0], zoom: 2, panX: 0.1, panY: 0.9 };
+    for (const [aspect, slides] of [
+      ['9:16', 5],
+      ['1:1', 1],
+      ['3:4', 20],
+    ] as const) {
+      const next = resize(w, aspect, slides);
+      expect(next.bento.layers.map((l) => [l.id, l.assetId, l.zoom, l.panX, l.panY])).toEqual(
+        w.bento.layers.map((l) => [l.id, l.assetId, l.zoom, l.panX, l.panY]),
+      );
+      noOverlap(next);
+      const right = Math.max(...next.bento.layers.map((l) => l.x + l.width));
+      const bottom = Math.max(...next.bento.layers.map((l) => l.y + l.height));
+      expect(right).toBeCloseTo(WIDTH * slides - 24);
+      expect(bottom).toBeCloseTo(ASPECTS[aspect] - 24);
+    }
+    expect(resize(layout([], 'bento'), '9:16', 4).bento).toMatchObject({ layers: [] });
+    expect(resize(layout([], 'bento'), '9:16', 4).bento.tree).toBeUndefined();
+  });
+  it('Scrapbook ratio changes scale layers without distortion', () => {
+    const w = layout(assets, 'scrapbook', 1);
+    const next = resize(w, '9:16', 3);
+    const k = 1920 / 1350;
+    next.scrapbook.layers.forEach((l, i) => {
+      const before = w.scrapbook.layers[i];
+      expect(l.width / l.height).toBeCloseTo(before.width / before.height);
+      expect(l.height).toBeCloseTo(before.height * k);
+      expect(center(l).x).toBeCloseTo(center(before).x);
+      expect(center(l).y).toBeCloseTo(center(before).y * k);
+      expect(l.rotation).toBe(before.rotation);
+    });
+    expect(resize(next, '4:5', 3).scrapbook.layers.map((l) => l.width)).toEqual(
+      w.scrapbook.layers.map((l) => expect.closeTo(l.width)),
+    );
+  });
+  it('Scrapbook keeps layers when adding slides and pulls removed ones onto the last slide', () => {
+    const w = layout(assets, 'scrapbook', 1);
+    expect(resize(w, '4:5', 7).scrapbook.layers).toEqual(w.scrapbook.layers);
+    const one = resize(w, '4:5', 1);
+    one.scrapbook.layers.forEach((l, i) => {
+      const before = w.scrapbook.layers[i];
+      if (center(before).x <= WIDTH) expect(l).toEqual(before);
+      else {
+        expect(l.x).toBeGreaterThanOrEqual(0);
+        expect(l.x + l.width).toBeLessThanOrEqual(WIDTH);
+        expect(l.y).toBe(before.y);
+      }
+    });
+    expect(w.scrapbook.layers.filter((l) => center(l).x > WIDTH).length).toBeGreaterThan(0);
+  });
+  it('Bento keeps every cell at least MIN_TILE, placing photos in order up to 6 per slide', () => {
+    const many = (n: number) => Array.from({ length: n }, (_, i) => ({ id: `p${i}` }) as Asset);
+    const check = (w: Workspace, input: Asset[]) => {
+      const { layers } = w.bento;
+      expect(layers.length).toBeGreaterThan(0);
+      expect(layers.length).toBeLessThanOrEqual(BENTO_PER_SLIDE * w.slides);
+      expect(new Set(layers.map((l) => l.assetId))).toEqual(
+        new Set(input.slice(0, layers.length).map((a) => a.id)),
+      );
+      for (const l of layers) {
+        expect(l.width).toBeGreaterThanOrEqual(MIN_TILE);
+        expect(l.height).toBeGreaterThanOrEqual(MIN_TILE);
+      }
+    };
+    for (const template of TEMPLATES) {
+      const twenty = many(20);
+      check(layout(twenty, 'bento', 0, template, { aspect: '1:1', slides: 1 }), twenty);
+      const hundred = many(100);
+      check(layout(hundred, 'bento', 3, template, { aspect: '9:16', slides: 20 }), hundred);
+      const wide = layout(twenty, 'bento', 1, template, { aspect: '4:5', slides: 20 });
+      const square = resize(wide, '1:1', 1);
+      check(
+        square,
+        wide.bento.layers.map((l) => ({ id: l.assetId }) as Asset),
+      );
+      // Rebuilds keep the surviving layers in their existing order.
+      expect(square.bento.layers.map((l) => l.id)).toEqual(
+        wide.bento.layers.slice(0, square.bento.layers.length).map((l) => l.id),
+      );
+    }
+  });
+  it('keeps a grabbable part of rotated Scrapbook layers on the canvas after ratio changes', () => {
+    const w = layout(assets.slice(0, 1), 'scrapbook', 0, undefined, { aspect: '9:16', slides: 1 });
+    w.scrapbook.layers[0] = {
+      ...w.scrapbook.layers[0],
+      x: -352,
+      y: 800,
+      width: 400,
+      height: 300,
+      rotation: 0,
+    };
+    const [l] = resize(w, '1:1', 1).scrapbook.layers;
+    expect(l.x + l.width).toBeGreaterThanOrEqual(GRAB - 1e-9);
+    const rotated = { ...l, x: 5000, y: -5000, rotation: 45 };
+    const kept = keepOnCanvas(rotated, 1080, 1080);
+    const half = ((rotated.width + rotated.height) * Math.SQRT1_2) / 2;
+    expect(kept.x + kept.width / 2 - half).toBeCloseTo(1080 - GRAB);
+    expect(kept.y + kept.height / 2 + half).toBeCloseTo(GRAB);
+    // Wider than the canvas: limits stay ordered and the layer still overlaps it.
+    const huge = keepOnCanvas({ ...l, x: -9000, width: 3000, rotation: 0 }, 1080, 1080);
+    expect(huge.x + huge.width).toBeCloseTo(GRAB);
+    expect(keepOnCanvas({ ...l, x: 10, y: 10 }, 1080, 1080)).toEqual({ ...l, x: 10, y: 10 });
+  });
+});
+describe('Bento editing', () => {
+  const cell = (w: Workspace, id: string) => {
+    const { x, y, width, height } = w.bento.layers.find((l) => l.id === id)!;
+    return { x, y, width, height };
+  };
+  const manual = (tree: BentoNode, ids: string[]): Workspace => {
+    const base = layout(
+      ids.map((id) => ({ id }) as Asset),
+      'bento',
+    );
+    const layers = ids.map((id, i) => ({ ...base.bento.layers[i], id, assetId: id }));
+    return applyBento({ ...base, bento: { ...base.bento, tree, layers } });
+  };
+  // a | (b / (c | d))
+  const nested = () =>
+    manual(
+      {
+        axis: 'x',
+        ratio: 0.3,
+        first: { layerId: 'a' },
+        second: {
+          axis: 'y',
+          ratio: 0.6,
+          first: { layerId: 'b' },
+          second: {
+            axis: 'x',
+            ratio: 0.4,
+            first: { layerId: 'c' },
+            second: { layerId: 'd' },
+          },
+        },
+      },
+      ['a', 'b', 'c', 'd'],
+    );
+  it('deleting a cell gives its rect to the sibling and keeps other cells and ratios', () => {
+    const w = nested();
+    const c = removeLayer(w, 'c');
+    // d takes over the parent's rect; a and b never move.
+    const parent = { ...cell(w, 'c'), width: cell(w, 'd').x + cell(w, 'd').width - cell(w, 'c').x };
+    expect(cell(c, 'd')).toEqual(parent);
+    expect(cell(c, 'a')).toEqual(cell(w, 'a'));
+    expect(cell(c, 'b')).toEqual(cell(w, 'b'));
+    expect(c.bento.tree).toEqual({
+      axis: 'x',
+      ratio: 0.3,
+      first: { layerId: 'a' },
+      second: { axis: 'y', ratio: 0.6, first: { layerId: 'b' }, second: { layerId: 'd' } },
+    });
+    // A whole subtree can be the sibling too, keeping its own ratio.
+    const a = removeLayer(w, 'a');
+    expect(a.bento.tree).toEqual((w.bento.tree as { second: BentoNode }).second);
+    expect(a.bento.layers.map((l) => l.id)).toEqual(['b', 'c', 'd']);
+  });
+  it('deleting the last photo leaves the background only', () => {
+    const w = layout(assets.slice(0, 1), 'bento');
+    const empty = removeLayer(w, w.bento.layers[0].id);
+    expect(empty.bento.tree).toBeUndefined();
+    expect(empty.bento.layers).toEqual([]);
+    expect(dividers(empty)).toEqual([]);
+    // The next photo fills the strip again.
+    const again = addToBento(empty, 'new');
+    expect(again.bento.layers[0]).toMatchObject({ assetId: 'new', x: 24, y: 24, width: 3192 });
+  });
+  it('adding splits the selected cell, or else the largest, along its longer side', () => {
+    const w = nested();
+    const selected = addToBento(w, 'new', 'a');
+    const before = cell(w, 'a');
+    expect(before.height).toBeGreaterThan(before.width);
+    expect(cell(selected, 'a')).toEqual({ ...before, height: (before.height - 12) / 2 });
+    expect(selected.bento.layers.at(-1)).toMatchObject({
+      assetId: 'new',
+      x: before.x,
+      y: before.y + (before.height - 12) / 2 + 12,
+      width: before.width,
+      height: (before.height - 12) / 2,
+    });
+    for (const id of ['b', 'c', 'd']) expect(cell(selected, id)).toEqual(cell(w, id));
+    const largest = addToBento(w, 'new');
+    const biggest = [...w.bento.layers].sort((p, q) => q.width * q.height - p.width * p.height)[0];
+    expect(cell(largest, biggest.id).width).toBeCloseTo((biggest.width - 12) / 2);
+    expect(largest.bento.layers).toHaveLength(5);
+  });
+  it('refuses a split below MIN_TILE, using the actual gap', () => {
+    // A cell exactly 2 × MIN_TILE + gap wide splits; anything narrower does not.
+    const fit = setSpacing(layout(assets.slice(0, 2), 'bento'), 'margin', 0);
+    const w: Workspace = {
+      ...fit,
+      aspect: '1:1',
+      slides: 1,
+      bento: { ...fit.bento, tree: { layerId: fit.bento.layers[0].id }, gap: 12 },
+    };
+    let narrow = applyBento(w);
+    narrow = {
+      ...narrow,
+      bento: {
+        ...narrow.bento,
+        layers: [{ ...narrow.bento.layers[0], width: 2 * MIN_TILE + 12, height: 200 }],
+      },
+    };
+    expect(addToBento(narrow, 'new').bento.layers).toHaveLength(2);
+    const tooNarrow = {
+      ...narrow,
+      bento: { ...narrow.bento, layers: [{ ...narrow.bento.layers[0], width: 2 * MIN_TILE + 11 }] },
+    };
+    expect(addToBento(tooNarrow, 'new')).toBe(tooNarrow);
+    const wider = { ...narrow, bento: { ...narrow.bento, gap: 13 } };
+    expect(addToBento(wider, 'new')).toBe(wider);
+  });
+  it('manual adds ignore the automatic cap and many uploads stop at MIN_TILE', () => {
+    let w = layout(assets, 'bento', 0, undefined, { aspect: '1:1', slides: 1 });
+    expect(w.bento.layers).toHaveLength(BENTO_PER_SLIDE);
+    w = addToBento(w, 'seventh');
+    expect(w.bento.layers).toHaveLength(BENTO_PER_SLIDE + 1);
+    const many = Array.from({ length: 60 }, (_, i) => ({ id: `m${i}` }) as Asset);
+    const full = addPhotos(w, many);
+    expect(full.bento.layers.length).toBeGreaterThan(BENTO_PER_SLIDE + 1);
+    expect(full.bento.layers.length).toBeLessThan(67);
+    for (const l of full.bento.layers) {
+      expect(l.width).toBeGreaterThanOrEqual(MIN_TILE);
+      expect(l.height).toBeGreaterThanOrEqual(MIN_TILE);
+    }
+    noOverlap(full);
+    // Every upload still reaches the other layout.
+    expect(full.scrapbook.layers).toHaveLength(66);
+  });
+  it('spacing values change cell rects and never push a cell under MIN_TILE', () => {
+    const w = layout(assets.slice(0, 2), 'bento', 0, 'balanced');
+    const [before] = w.bento.layers;
+    const gap = setSpacing(w, 'gap', 40);
+    expect(gap.bento.gap).toBe(40);
+    noOverlap(gap);
+    const gapped = gap.bento.layers;
+    expect(gapped[1].x - (gapped[0].x + gapped[0].width)).toBeCloseTo(40);
+    const margin = setSpacing(w, 'margin', 100);
+    expect(margin.bento.layers[0]).toMatchObject({ x: 100, y: 100 });
+    expect(margin.bento.layers[0].width).toBeLessThan(before.width);
+    expect(setSpacing(w, 'radius', 30).bento.layers).toEqual(w.bento.layers);
+    // The tightest template stops where a cell would drop below MIN_TILE.
+    const tight = layout(assets, 'bento', 0, undefined, { aspect: '1:1', slides: 1 });
+    const stopped = setSpacing(tight, 'margin', 120);
+    expect(stopped.bento.margin).toBeLessThanOrEqual(120);
+    for (const l of stopped.bento.layers)
+      expect(Math.min(l.width, l.height)).toBeGreaterThanOrEqual(MIN_TILE - 0.001);
+    if (stopped.bento.margin < 120) {
+      const next = applyBento({
+        ...stopped,
+        bento: { ...stopped.bento, margin: stopped.bento.margin + 1 },
+      });
+      expect(Math.min(...next.bento.layers.map((l) => Math.min(l.width, l.height)))).toBeLessThan(
+        MIN_TILE,
+      );
+    }
+    // New layouts, rebuilds and resizes keep the chosen spacing.
+    expect(regenerate(gap, assets, 1).bento.gap).toBe(40);
+    expect(resize(gap, '9:16', 2).bento.gap).toBe(40);
+    const small = dividers(setSpacing(w, 'gap', 0))[0];
+    expect(small.position).toBeCloseTo(
+      w.bento.margin + (w.bento.layers[0].width + 12 + w.bento.layers[1].width) / 2,
+      0,
+    );
+  });
+  it('keeps both layouts across style switches and shuffles only the active one', () => {
+    const w = layout(assets, 'bento', 1);
+    const moved: Workspace = {
+      ...w,
+      scrapbook: {
+        order: [],
+        layers: w.scrapbook.layers.map((l, i) => (i ? l : { ...l, x: 777, y: 55 })),
+      },
+    };
+    const edited = setSpacing(removeLayer(moved, moved.bento.layers[0].id), 'gap', 30);
+    const scrap: Workspace = { ...edited, style: 'scrapbook' };
+    expect(activeLayers(scrap)).toEqual(moved.scrapbook.layers);
+    const back: Workspace = { ...scrap, style: 'bento' };
+    expect(back).toEqual(edited);
+    const shuffled = regenerate(scrap, assets, 2);
+    expect(shuffled.bento).toEqual(edited.bento);
+    expect(regenerate(edited, assets, 2).scrapbook).toEqual(edited.scrapbook);
+    expect(regenerate(edited, assets, 2).background).toBe(edited.background);
+  });
+  it('photos added in one style appear in the other; library removal clears both', () => {
+    const start = layout(assets.slice(0, 2), 'scrapbook');
+    const added = addPhotos(start, [{ id: 'new' } as Asset]);
+    expect(added.scrapbook.layers.some((l) => l.assetId === 'new')).toBe(true);
+    expect(added.bento.layers.some((l) => l.assetId === 'new')).toBe(true);
+    expect(addPhotos(layout([], 'scrapbook'), assets).bento.layers).toHaveLength(6);
+    const gone = removeAsset(added, 'new');
+    expect(gone.scrapbook.layers).toEqual(start.scrapbook.layers);
+    expect(gone.bento.layers.some((l) => l.assetId === 'new')).toBe(false);
+    expect(gone.bento.layers).toHaveLength(2);
+    noOverlap(gone);
+    // Deleting a cell leaves the other layout alone until the library photo itself goes.
+    const asBento: Workspace = { ...added, style: 'bento' };
+    const cut = removeLayer(asBento, asBento.bento.layers.find((l) => l.assetId === 'new')!.id);
+    expect(cut.scrapbook).toEqual(added.scrapbook);
+    expect(removeAsset(cut, 'new').scrapbook.layers).toHaveLength(2);
+  });
+  it('ratio and slide changes apply to both stored layouts', () => {
+    const w = layout(assets, 'scrapbook', 1);
+    const next = resize(w, '9:16', 3);
+    expect(next.scrapbook.layers[0].height).toBeCloseTo(
+      (w.scrapbook.layers[0].height * 1920) / 1350,
+    );
+    expect(Math.max(...next.bento.layers.map((l) => l.y + l.height))).toBeCloseTo(1920 - 24);
+  });
+});
+describe('text layers', () => {
+  const chars = (s: string) => s.length * 10;
+  const withText = (style: 'bento' | 'scrapbook', ...ids: string[]) => {
+    const w = layout(assets.slice(0, 2), style);
+    return { ...w, overlays: ids.map((id) => ({ ...newText(0, 1350), id })) };
+  };
+  const ids = (w: Workspace) => stack(w).map((l) => l.id);
+  it('wraps on words, keeps explicit and empty lines, and breaks only words wider than the box', () => {
+    expect(wrapText('aa bb cc', 50, chars)).toEqual(['aa bb', 'cc']);
+    expect(wrapText('aa\n\nbb', 50, chars)).toEqual(['aa', '', 'bb']);
+    expect(wrapText('', 50, chars)).toEqual(['']);
+    expect(wrapText('abcdefgh ij', 30, chars)).toEqual(['abc', 'def', 'gh', 'ij']);
+    // Never loops or drops text when not even one character fits.
+    expect(wrapText('abc', 1, chars)).toEqual(['a', 'b', 'c']);
+    // Emoji sequences stay whole.
+    expect(wrapText('👩‍🚀👩‍🚀', 1, chars)).toEqual(['👩‍🚀', '👩‍🚀']);
+    const clusters = ['👨‍👩‍👧‍👦', '🇮🇳', '👍🏽', '1️⃣', '❤️'];
+    expect(wrapText(clusters.join(''), 1, chars)).toEqual(clusters);
+    // A cluster wider than the box stays whole among words too.
+    expect(wrapText('a 👨‍👩‍👧‍👦 🇮🇳🇯🇵', 1, chars)).toEqual(['a', '👨‍👩‍👧‍👦', '🇮🇳', '🇯🇵']);
+  });
+  it('accepts anything holding an emoji and rejects empty, emoji-free or long input', () => {
+    for (const ok of ['🎉', '❤️', '👍🏽', '👨‍👩‍👧‍👦', '🇮🇳', '1️⃣', 'hi 🎉', '🎉'.repeat(MAX_EMOJI)])
+      expect(emojiError(ok)).toBe('');
+    expect(emojiError('')).toMatch(/first/);
+    expect(emojiError('   ')).toMatch(/first/);
+    for (const bad of ['hello', '123', '#', ':)', '🇮', '\u20E3', 'a\u20E3', '©', '®', '™'])
+      expect(emojiError(bad)).toMatch(/no emoji/);
+    expect(emojiError('🎉'.repeat(MAX_EMOJI + 1))).toMatch(/too long/);
+    // One grapheme, however many marks it stacks, still has to stay short.
+    expect(emojiError('🎉' + '\u0301'.repeat(500))).toMatch(/too long/);
+  });
+  it('treats only text made entirely of emoji as emoji-only', () => {
+    for (const yes of ['🎉', '🎉 ❤️', '👨‍👩‍👧‍👦🇮🇳', '1️⃣', '©\uFE0F']) expect(isEmojiOnly(yes)).toBe(true);
+    for (const no of ['', ' ', 'hi 🎉', 'abc', '1', '🇮', 'a\u20E3', '©', '™'])
+      expect(isEmojiOnly(no)).toBe(false);
+  });
+  it('places an emoji large and centred, with room for each one', () => {
+    const one = newEmoji(2, 1350, '🎉');
+    expect(one).toMatchObject({ type: 'text', text: '🎉', size: 240 });
+    expect(one.x + one.width / 2).toBeCloseTo(2 * 1080 + 540);
+    expect(one.y + one.height / 2).toBeCloseTo(675);
+    expect(newEmoji(0, 1350, '👨‍👩‍👧‍👦🇮🇳').width).toBeGreaterThan(one.width);
+    expect(newEmoji(0, 1350, '🎉'.repeat(MAX_EMOJI)).width).toBe(1080);
+  });
+  it('wraps inside the padding and fits the height to the lines, keeping the rotated top edge', () => {
+    const l = { ...newText(0, 1350), text: 'aa bb cc', size: 100, width: 110, rotation: 90 };
+    // 110 wide less 30 padding each side leaves 50: 'aa bb' is exactly 50, but size 100 pads 30.
+    expect(textLines(l, chars)).toEqual(['aa bb', 'cc']);
+    const top = (b: typeof l) => ({
+      // The centre of the top edge; at 90° the layer's "up" points to +x.
+      x: b.x + b.width / 2 + b.height / 2,
+      y: b.y + b.height / 2,
+    });
+    const before = { ...l, height: 125 };
+    const fitted = fitTextBox(before, chars);
+    expect(fitted.height).toBe(2 * 125);
+    expect(top(fitted).x).toBeCloseTo(top(before).x);
+    expect(top(fitted).y).toBeCloseTo(top(before).y);
+  });
+  it('changing width keeps the opposite side fixed on a rotated box and respects the limits', () => {
+    const l = { ...newText(0, 1350), x: 100, y: 100, width: 400, height: 90, rotation: 90 };
+    // At 90° the east side faces down, so its handle follows y.
+    // The west side sits at y = 145 - 200 = -55, so a pointer at y = 445 means a width of 500.
+    const e = resizeTextWidth(l, { x: 0, y: 445 }, 'e', 3240);
+    expect(e.width).toBeCloseTo(500);
+    const left = (b: typeof l) => b.y + b.height / 2 - b.width / 2;
+    expect(left(e)).toBeCloseTo(left(l));
+    expect(resizeTextWidth(l, { x: 0, y: -999 }, 'e', 3240).width).toBe(TEXT_MIN_WIDTH);
+    expect(resizeTextWidth(l, { x: 0, y: 9999 }, 'e', 500).width).toBe(500);
+  });
+  it('hit-tests rotated text in its own frame, above photos', () => {
+    const w = withText('scrapbook', 't');
+    const [photo] = w.scrapbook.layers;
+    const text = { ...w.overlays[0], x: 100, y: 500, width: 400, height: 100, rotation: 90 };
+    const scene: Workspace = {
+      ...w,
+      overlays: [text],
+      scrapbook: {
+        order: [],
+        layers: [{ ...photo, x: 100, y: 100, width: 400, height: 800, rotation: 0 }],
+      },
+    };
+    // The box is now 100 wide and 400 tall around (300, 550).
+    expect(hitLayer(stack(scene), { x: 300, y: 720 })?.id).toBe('t');
+    expect(hitLayer([text], { x: 120, y: 550 })).toBeUndefined();
+    expect(hitLayer(stack(scene), { x: 120, y: 550 })?.id).toBe(photo.id);
+    // A Bento drop only ever looks at photos.
+    expect(hitLayer(activeLayers(scene), { x: 300, y: 720 })?.id).toBe(photo.id);
+  });
+  it('Bento floats text above the grid and reorders only among text', () => {
+    const w = withText('bento', 't1', 't2');
+    const photos = w.bento.layers.map((l) => l.id);
+    expect(ids(w)).toEqual([...photos, 't1', 't2']);
+    const up = reorderLayer(w, 't1', 'forward');
+    expect(ids(up)).toEqual([...photos, 't2', 't1']);
+    expect(reorderLayer(up, 't1', 'forward')).toBe(up);
+    expect(reorderLayer(w, photos[0], 'forward')).toBe(w);
+    // Scrapbook's stack is untouched by Bento's floating order.
+    expect(up.scrapbook).toEqual(w.scrapbook);
+  });
+  it('Scrapbook shares one stack: text moves between photos and Bento keeps its own order', () => {
+    const w = withText('scrapbook', 't1', 't2');
+    const [a, b] = w.scrapbook.layers.map((l) => l.id);
+    expect(ids(w)).toEqual([a, b, 't1', 't2']);
+    const down = reorderLayer(w, 't1', 'backward');
+    expect(ids(down)).toEqual([a, 't1', b, 't2']);
+    expect(ids(reorderLayer(down, a, 'forward'))).toEqual(['t1', a, b, 't2']);
+    expect(down.scrapbook.layers.map((l) => l.id)).toEqual([a, b]);
+    expect(ids({ ...down, style: 'bento' }).slice(-2)).toEqual(['t1', 't2']);
+    // New layers stack on top without touching the order.
+    const added = { ...down, overlays: [...down.overlays, { ...down.overlays[0], id: 't3' }] };
+    expect(ids(added)).toEqual([a, 't1', b, 't2', 't3']);
+    // Deleting takes the id out of the order, in the same step.
+    const gone = removeLayer(down, 't1');
+    expect(gone.scrapbook.order).toEqual([a, b, 't2']);
+    expect(gone.overlays.map((l) => l.id)).toEqual(['t2']);
+    const noPhoto = removeLayer(down, a);
+    expect(noPhoto.scrapbook.order).toEqual(['t1', b, 't2']);
+    const noAsset = removeAsset(down, w.scrapbook.layers[1].assetId);
+    expect(noAsset.scrapbook.order).toEqual([a, 't1', 't2']);
+  });
+  it('removing a Bento cell leaves the Scrapbook order of a photo sharing its id alone', () => {
+    const w = reorderLayer(withText('scrapbook', 't'), 't', 'back');
+    const bento: Workspace = { ...w, style: 'bento' };
+    const id = bento.bento.layers[0].id;
+    expect(w.scrapbook.order).toContain(id);
+    expect(removeLayer(bento, id).scrapbook.order).toEqual(w.scrapbook.order);
+  });
+  it('is shared across style switches, shuffles and photo changes', () => {
+    const w = withText('bento', 't');
+    expect({ ...w, style: 'scrapbook' as const }.overlays).toEqual(w.overlays);
+    expect(regenerate(w, assets, 3).overlays).toEqual(w.overlays);
+    expect(regenerate({ ...w, style: 'scrapbook' }, assets, 3).overlays).toEqual(w.overlays);
+    expect(addPhotos(w, [{ id: 'new' } as Asset]).overlays).toEqual(w.overlays);
+    const moved = updateLayer(w, { ...w.overlays[0], x: 5 });
+    expect(moved.overlays[0].x).toBe(5);
+    expect(moved.bento).toEqual(w.bento);
+  });
+  it('scales with the format like Scrapbook, in both styles, and moves off removed slides', () => {
+    for (const style of ['bento', 'scrapbook'] as const) {
+      const w = withText(style, 't');
+      const l = { ...w.overlays[0], x: 2400, width: 500, height: 90, size: 72 };
+      const next = resize({ ...w, overlays: [l] }, '9:16', 1).overlays[0];
+      const k = 1920 / 1350;
+      expect(next.width).toBeCloseTo(500 * k);
+      expect(next.height).toBeCloseTo(90 * k);
+      expect(next.size).toBeCloseTo(72 * k);
+      expect(next.x).toBeLessThan(1080);
+      const small = resize(
+        { ...w, aspect: '9:16', overlays: [{ ...l, size: 12, width: 80 }] },
+        '1:1',
+        3,
+      );
+      expect(small.overlays[0].size).toBe(12);
+      expect(small.overlays[0].width).toBe(80);
+    }
+  });
 });

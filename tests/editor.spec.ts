@@ -38,7 +38,7 @@ test('guest creates, crops, undoes, restores and exports three full-resolution s
   await page.goto('/');
   await expect(page.getByLabel('Upload photos')).toBeEnabled();
   await upload(page);
-  await expect(page.getByLabel('Your continuous three-slide collage')).toBeVisible();
+  await expect(page.getByLabel('Your continuous 3-slide collage')).toBeVisible();
   await page.getByLabel('Photo zoom').fill('2');
   await expect(page.getByLabel('Photo zoom')).toHaveValue('2');
   await page.getByRole('button', { name: 'Undo', exact: true }).click();
@@ -70,14 +70,14 @@ test('single editing tab hands ownership over without losing the workspace', asy
   await page.goto('/');
   await expect(page.getByLabel('Upload photos')).toBeEnabled();
   await upload(page, 3);
-  await expect(page.getByLabel('Your continuous three-slide collage')).toBeVisible();
+  await expect(page.getByLabel('Your continuous 3-slide collage')).toBeVisible();
   const second = await context.newPage();
   await second.goto('/');
   await expect(second.getByLabel('Upload photos')).toBeDisabled();
   await second.getByRole('button', { name: 'Edit here', exact: true }).click();
   await expect(second.getByLabel('Upload photos')).toBeEnabled();
   await expect(page.getByLabel('Upload photos')).toBeDisabled();
-  await expect(second.getByLabel('Your continuous three-slide collage')).toBeVisible();
+  await expect(second.getByLabel('Your continuous 3-slide collage')).toBeVisible();
 });
 test('unsupported files fail visibly and mobile layout stays within the viewport', async ({
   page,
@@ -91,7 +91,7 @@ test('unsupported files fail visibly and mobile layout stays within the viewport
   await expect(page.getByRole('alert')).toContainText('use JPEG, PNG or WebP');
   await upload(page, 3);
   await page.getByRole('button', { name: /Scrapbook/ }).click();
-  await expect(page.getByLabel('Your continuous three-slide collage')).toBeVisible();
+  await expect(page.getByLabel('Your continuous 3-slide collage')).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: 'test-results/editor-mobile.png', fullPage: true });
 });
@@ -109,7 +109,7 @@ test('auth proxy resolves guest sessions and invalid links preserve the local co
   await expect(page.getByRole('status').filter({ hasText: 'Saved on this device' })).toBeVisible();
   await page.goto('/?sign_in_error=1');
   await expect(page.getByRole('alert')).toContainText('invalid or expired');
-  await expect(page.getByLabel('Your continuous three-slide collage')).toBeVisible();
+  await expect(page.getByLabel('Your continuous 3-slide collage')).toBeVisible();
   if (session.status() === 200) {
     await expect(page.getByLabel('Email address', { exact: true })).toBeVisible();
     await page.route('**/api/auth/sign-in/magic-link', (route) =>
@@ -122,33 +122,22 @@ test('auth proxy resolves guest sessions and invalid links preserve the local co
     await page.getByLabel('Email address', { exact: true }).fill('test@example.com');
     await page.getByRole('button', { name: 'Email me a sign-in link' }).click();
     await expect(page.locator('.auth-error')).toContainText('wait a minute');
-    await expect(page.getByLabel('Your continuous three-slide collage')).toBeVisible();
+    await expect(page.getByLabel('Your continuous 3-slide collage')).toBeVisible();
   }
 });
 
 async function saved(page: Page) {
   await expect(page.getByRole('status').filter({ hasText: 'Saved on this device' })).toBeVisible();
   return page.evaluate(async () => {
-    const db = await new Promise<IDBDatabase>((resolve, reject) => {
-      const r = indexedDB.open('living-carousel', 1);
-      r.onsuccess = () => resolve(r.result);
-      r.onerror = () => reject(r.error);
-    });
-    try {
-      const project = await new Promise<{
-        workspace: import('../apps/web/src/lib/editor/model').Workspace;
-        assets: { id: string; name: string }[];
-      }>((resolve) => {
-        const r = db.transaction('project').objectStore('project').get('active');
-        r.onsuccess = () => resolve(r.result);
-      });
-      return {
-        workspace: project.workspace,
-        assets: project.assets.map((a) => ({ id: a.id, name: a.name })),
-      };
-    } finally {
-      db.close();
-    }
+    const path = '/src/lib/editor/storage.ts';
+    const storage: typeof import('../apps/web/src/lib/editor/storage') = await import(path);
+    const project = (await storage.loadProject())!;
+    const { workspace } = project;
+    return {
+      // Existing checks read the active layout's layers.
+      workspace: { ...workspace, layers: workspace[workspace.style].layers },
+      assets: project.assets.map((a) => ({ id: a.id, name: a.name })),
+    };
   });
 }
 async function drag(page: Page, selector: string, dx: number, dy: number) {
@@ -210,7 +199,9 @@ test('Scrapbook mouse editing supports move, resize, rotate, stacking, delete, r
   await page.keyboard.press('Escape');
   await page.mouse.up();
   expect((await saved(page)).workspace.layers).toEqual(beforeCancel);
-  await page.getByRole('button', { name: 'Edit photo 1', exact: true }).click();
+  const name = original.assets.find((a) => a.id === first.assetId)!.name;
+  await page.getByRole('button', { name: `Select ${name}`, exact: true }).click();
+  await expect(page.getByText('Make photo 1 yours')).toBeVisible();
   await page.getByRole('button', { name: 'Delete photo', exact: true }).click();
   project = await saved(page);
   expect(project.workspace.layers).toHaveLength(12);
@@ -219,7 +210,6 @@ test('Scrapbook mouse editing supports move, resize, rotate, stacking, delete, r
   expect((await saved(page)).workspace.layers).toHaveLength(13);
   await page.getByRole('button', { name: 'Redo', exact: true }).click();
   await saved(page);
-  const name = original.assets.find((a) => a.id === first.assetId)!.name;
   await page.getByRole('button', { name: `Add back ${name}`, exact: true }).click();
   expect((await saved(page)).workspace.layers).toHaveLength(13);
   const final = (await saved(page)).workspace;
@@ -313,7 +303,7 @@ test('Bento templates change geometry, mouse swaps preserve slots, and shared bo
   await page.screenshot({ path: 'test-results/bento-interactive.png', fullPage: true });
 });
 
-test('transformed Scrapbook exports match the continuous composition pixel for pixel at slide seams', async ({
+test('transformed Scrapbook per-slide exports match the continuous composition at slide seams', async ({
   page,
 }) => {
   await page.goto('/');
@@ -326,31 +316,28 @@ test('transformed Scrapbook exports match the continuous composition pixel for p
   await page.getByLabel('Photo rotation', { exact: true }).fill('27');
   await page.getByLabel('Photo rotation', { exact: true }).press('Tab');
   await saved(page);
-  const pending = page.waitForEvent('download');
-  await page.getByRole('button', { name: /Download images/ }).click();
-  const stream = await (await pending).createReadStream();
-  const chunks = [];
-  for await (const c of stream!) chunks.push(c);
-  const files = unzipSync(Buffer.concat(chunks));
-  const slides = Object.keys(files)
-    .sort()
-    .map((name) => Buffer.from(files[name]).toString('base64'));
-  const differences = await page.evaluate(async (encoded) => {
-    const request = indexedDB.open('living-carousel', 1);
-    const db = await new Promise<IDBDatabase>(
-      (resolve) => (request.onsuccess = () => resolve(request.result)),
+  const slides = (await exported(page)).map((f) => f.bytes.toString('base64'));
+  const results = await page.evaluate(async (encoded) => {
+    const storage: typeof import('../apps/web/src/lib/editor/storage') = await import(
+      '/src/lib/editor/storage.ts' as string
     );
-    const project = await new Promise<import('../apps/web/src/lib/editor/model').Project>(
-      (resolve) => {
-        const r = db.transaction('project').objectStore('project').get('active');
-        r.onsuccess = () => resolve(r.result);
-      },
+    const model: typeof import('../apps/web/src/lib/editor/model') = await import(
+      '/src/lib/editor/model.ts' as string
     );
-    db.close();
+    const project = (await storage.loadProject())!;
     const path = '/src/lib/editor/render.ts';
     const renderer = await import(path);
     const wide = document.createElement('canvas');
     await renderer.draw(project, wide, 1);
+    // Rotated edges antialias differently under translation; this is the only place a larger difference is allowed.
+    const onRotatedEdge = (x: number, y: number) =>
+      project.workspace.scrapbook.layers.some((l) => {
+        const p = model.localPoint(l, { x: x + 0.5, y: y + 0.5 });
+        const outline = (left: number, top: number, right: number, bottom: number) =>
+          Math.abs(Math.max(left - p.x, p.x - right, top - p.y, p.y - bottom)) <= 3;
+        const [w, h] = [l.width / 2, l.height / 2];
+        return outline(-w, -h, w, h) || outline(-w - 12, -h - 12, w + 12, h + 32);
+      });
     const result = [];
     for (let i = 0; i < encoded.length; i++) {
       const blob = await (await fetch('data:image/png;base64,' + encoded[i])).blob();
@@ -364,47 +351,120 @@ test('transformed Scrapbook exports match the continuous composition pixel for p
       const actual = ctx.getImageData(0, 0, 1080, 1350).data;
       const expected = wide.getContext('2d')!.getImageData(i * 1080, 0, 1080, 1350).data;
       let mismatch = 0;
-      for (let p = 0; p < actual.length; p++) if (Math.abs(actual[p] - expected[p]) > 1) mismatch++;
-      result.push(mismatch);
+      let max = 0;
+      let offEdge = 0;
+      for (let p = 0; p < actual.length; p++) {
+        const d = Math.abs(actual[p] - expected[p]);
+        if (d > 1) mismatch++;
+        max = Math.max(max, d);
+        const n = p >> 2;
+        if (d > 16 && !onRotatedEdge((n % 1080) + i * 1080, Math.floor(n / 1080))) offEdge++;
+      }
+      result.push({ max, offEdge, rare: mismatch < actual.length / 2000 });
     }
     return result;
   }, slides);
-  expect(differences).toEqual([0, 0, 0]);
+  for (const { max, offEdge, rare } of results) {
+    expect(offEdge).toBe(0);
+    expect(max).toBeLessThanOrEqual(48);
+    expect(rare).toBe(true);
+  }
 });
-test('legacy workspaces retain their photos and transforms until a new Bento template is chosen', async ({
+test('a high-contrast photo crossing the seams lines up in exports and the editor paint', async ({
   page,
 }) => {
   await page.goto('/');
   await expect(page.getByLabel('Upload photos')).toBeEnabled();
-  await upload(page, 6);
-  const original = await saved(page);
-  await page.evaluate(async () => {
-    const r = indexedDB.open('living-carousel', 1);
-    const db = await new Promise<IDBDatabase>((resolve) => (r.onsuccess = () => resolve(r.result)));
-    await new Promise<void>((resolve) => {
-      const tx = db.transaction('project', 'readwrite');
-      const store = tx.objectStore('project');
-      const get = store.get('active');
-      get.onsuccess = () => {
-        const p = get.result;
-        delete p.workspace.bento;
-        delete p.workspace.template;
-        store.put(p, 'active');
-      };
-      tx.oncomplete = () => resolve();
-    });
-    db.close();
+  const data = await page.evaluate(() => {
+    const c = document.createElement('canvas');
+    c.width = 1440;
+    c.height = 600;
+    const ctx = c.getContext('2d')!;
+    const colors = ['#000000', '#ffffff', '#ff0000', '#0000ff', '#00ff00'];
+    for (let x = 0; x < c.width; x += 12)
+      for (let y = 0; y < c.height; y += 12) {
+        ctx.fillStyle = colors[(x / 12 + (y / 12) * 2) % colors.length];
+        ctx.fillRect(x, y, 12, 12);
+      }
+    // One transparent pixel keeps master and preview lossless PNGs, so they decode identically.
+    ctx.clearRect(0, 0, 1, 1);
+    return c.toDataURL().split(',')[1];
   });
-  await page.reload();
-  await expect(page.getByLabel('Bento template')).toHaveValue('');
-  const restored = await saved(page);
-  expect(restored.workspace.layers).toEqual(original.workspace.layers);
-  expect(restored.assets).toEqual(original.assets);
-  await page.getByLabel('Bento template').selectOption('mosaic');
-  await expect(page.locator('.divider-handle')).toHaveCount(5);
-  expect((await saved(page)).assets).toEqual(original.assets);
+  await page.getByLabel('Upload photos').setInputFiles({
+    name: 'checks.png',
+    mimeType: 'image/png',
+    buffer: Buffer.from(data, 'base64'),
+  });
+  await expect(page.locator('.photo-hit')).toHaveCount(1);
+  const compare = async () => {
+    await saved(page);
+    const slides = (await exported(page)).map((f) => f.bytes.toString('base64'));
+    return page.evaluate(async (encoded) => {
+      const storage: typeof import('../apps/web/src/lib/editor/storage') = await import(
+        '/src/lib/editor/storage.ts' as string
+      );
+      const project = (await storage.loadProject())!;
+      const path = '/src/lib/editor/render.ts';
+      const renderer = await import(path);
+      const canvas = (width: number) =>
+        Object.assign(document.createElement('canvas'), { width, height: 1350 });
+      const read = (c: HTMLCanvasElement, x = 0, width = c.width) =>
+        c.getContext('2d')!.getImageData(x, 0, width, 1350).data;
+      const worst = (a: ArrayLike<number>, b: ArrayLike<number>) => {
+        let max = 0;
+        for (let p = 0; p < a.length; p++) max = Math.max(max, Math.abs(a[p] - b[p]));
+        return max;
+      };
+      const strip = canvas(3240);
+      for (let i = 0; i < encoded.length; i++) {
+        const blob = await (await fetch('data:image/png;base64,' + encoded[i])).blob();
+        const image = await createImageBitmap(blob);
+        strip.getContext('2d')!.drawImage(image, i * 1080, 0);
+        image.close();
+      }
+      const wide = document.createElement('canvas');
+      await renderer.draw(project, wide, 1);
+      // The editor's own decode and paint, 1:1 over the whole strip and over each seam.
+      const images = await renderer.syncPreviews(
+        renderer.previewCache(),
+        project.assets,
+        () => 1440,
+      );
+      const painted = [
+        [0, 3240],
+        [900, 360],
+        [1980, 360],
+      ].map(([x, width]) => {
+        const view = canvas(width);
+        renderer.paint(project, images, view, { x: -x, y: 0, scale: 1 });
+        return worst(read(view), read(strip, x, width));
+      });
+      return {
+        draw: worst(read(strip), read(wide)),
+        painted,
+        // The seam must carry real contrast, or the limits above would prove nothing.
+        contrast: [1080, 2160].map((seam) => {
+          const band = read(strip, seam - 8, 16).filter((_, p) => p % 4 === 0);
+          return Math.max(...band) - Math.min(...band);
+        }),
+      };
+    }, slides);
+  };
+  const bento = await compare();
+  expect(bento.draw).toBeLessThanOrEqual(16);
+  for (const d of bento.painted) expect(d).toBeLessThanOrEqual(16);
+  for (const c of bento.contrast) expect(c).toBeGreaterThan(200);
+  await page.getByRole('button', { name: /Scrapbook/ }).click();
+  await saved(page);
+  await page.getByLabel('Photo position X', { exact: true }).fill('900');
+  await page.getByLabel('Photo position X', { exact: true }).press('Tab');
+  await page.getByLabel('Photo rotation', { exact: true }).fill('0');
+  await page.getByLabel('Photo rotation', { exact: true }).press('Tab');
+  const scrapbook = await compare();
+  expect(scrapbook.draw).toBeLessThanOrEqual(16);
+  for (const d of scrapbook.painted) expect(d).toBeLessThanOrEqual(16);
+  expect(scrapbook.contrast[0]).toBeGreaterThan(200);
 });
-
 test('Bento touch dragging shows a photo above the finger and swaps on release', async ({
   browser,
 }) => {
@@ -445,4 +505,1281 @@ test('Bento touch dragging shows a photo above the finger and swaps on release',
   } finally {
     await context.close();
   }
+});
+
+async function dispatchFiles(
+  page: Page,
+  kind: 'drop' | 'paste' | 'dragover' | 'dragleave',
+  count: number,
+  target = '.intro',
+) {
+  return page.evaluate(
+    async ({ kind, count, target }) => {
+      const data = new DataTransfer();
+      for (let i = 0; i < count; i++) {
+        const c = document.createElement('canvas');
+        c.width = c.height = 200 + i * 40;
+        c.getContext('2d')!.fillRect(0, 0, 10, 10);
+        const blob = await new Promise<Blob>((r) => c.toBlob((b) => r(b!)));
+        data.items.add(new File([blob], `${kind}-${i}.png`, { type: 'image/png' }));
+      }
+      const init = { bubbles: true, cancelable: true };
+      const event =
+        kind === 'paste'
+          ? new ClipboardEvent('paste', { ...init, clipboardData: data })
+          : new DragEvent(kind, { ...init, dataTransfer: data });
+      document.querySelector(target)!.dispatchEvent(event);
+      return event.defaultPrevented;
+    },
+    { kind, count, target },
+  );
+}
+test('photos dropped anywhere on the page or pasted are added without leaving the editor', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  expect(await dispatchFiles(page, 'drop', 2)).toBe(true);
+  await expect(page.locator('.count')).toHaveText('2/100');
+  expect(await dispatchFiles(page, 'paste', 1)).toBe(true);
+  await expect(page.locator('.photo-hit')).toHaveCount(3);
+  await expect(page).toHaveURL('/');
+  const upload = page.locator('button.upload');
+  await dispatchFiles(page, 'dragover', 1);
+  await expect(upload).toHaveClass(/drag-over/);
+  await dispatchFiles(page, 'drop', 1);
+  await expect(upload).not.toHaveClass(/drag-over/);
+  await expect(page.locator('.photo-hit')).toHaveCount(4);
+  await dispatchFiles(page, 'dragover', 1);
+  await expect(upload).toHaveClass(/drag-over/);
+  await dispatchFiles(page, 'dragleave', 1);
+  await expect(upload).not.toHaveClass(/drag-over/);
+  // Pastes into text fields belong to the field, not the photo library.
+  await page.evaluate(() => {
+    document.body.append(
+      Object.assign(document.createElement('textarea'), { id: 'paste-textarea' }),
+      Object.assign(document.createElement('input'), { id: 'paste-input' }),
+    );
+  });
+  expect(await dispatchFiles(page, 'paste', 1, '#paste-textarea')).toBe(false);
+  expect(await dispatchFiles(page, 'paste', 1, '#paste-input')).toBe(false);
+  await expect(page.locator('.count')).toHaveText('4/100');
+  await expect(page.locator('.photo-hit')).toHaveCount(4);
+});
+
+test('Bento arrow keys swap the selected photo with its neighbours and undo restores the order', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await upload(page, 3);
+  const before = (await saved(page)).workspace;
+  expect(before.style).toBe('bento');
+  const [a, b] = before.layers;
+  const first = page.locator(`[data-layer-id="${a.id}"]`);
+  await first.click();
+  await expect(
+    page.getByRole('group', { name: 'Interactive collage canvas' }),
+  ).toHaveAccessibleDescription(/arrow keys to swap/);
+  await page.keyboard.press('ArrowRight');
+  await expect(page.locator(`[data-layer-id="${b.id}"]`)).toHaveAttribute('aria-pressed', 'true');
+  let w = (await saved(page)).workspace;
+  expect(w.layers.map((l) => l.assetId)).toEqual([b.assetId, a.assetId, before.layers[2].assetId]);
+  await page.keyboard.press('ArrowLeft');
+  w = (await saved(page)).workspace;
+  expect(w.layers.map((l) => l.assetId)).toEqual(before.layers.map((l) => l.assetId));
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  expect((await saved(page)).workspace).toEqual(before);
+});
+
+test('large uploads are stored as capped, re-encoded masters with editing previews', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  const files = await page.evaluate(() => {
+    const encode = (w: number, h: number, alpha: boolean) => {
+      const c = document.createElement('canvas');
+      c.width = w;
+      c.height = h;
+      const ctx = c.getContext('2d')!;
+      const g = ctx.createLinearGradient(0, 0, w, h);
+      g.addColorStop(0, '#7495a4');
+      g.addColorStop(1, '#e6dfc4');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, w, h);
+      if (alpha) ctx.clearRect(0, 0, w / 2, h / 2);
+      const type = alpha ? 'image/png' : 'image/jpeg';
+      const data = c.toDataURL(type, 0.9).split(',')[1];
+      c.width = c.height = 0;
+      return { type, data };
+    };
+    // One barely-transparent pixel that averages away at preview size.
+    const subtle = () => {
+      const c = document.createElement('canvas');
+      c.width = c.height = 3000;
+      const ctx = c.getContext('2d')!;
+      ctx.fillStyle = '#7495a4';
+      ctx.fillRect(0, 0, 3000, 3000);
+      ctx.putImageData(
+        new ImageData(new Uint8ClampedArray([116, 149, 164, 254]), 1, 1),
+        1500,
+        1500,
+      );
+      const data = c.toDataURL('image/png').split(',')[1];
+      c.width = c.height = 0;
+      return { type: 'image/png', data };
+    };
+    return [encode(6000, 4000, false), encode(400, 300, true), encode(300, 400, false), subtle()];
+  });
+  await page.getByLabel('Upload photos').setInputFiles(
+    files.map((f, i) => ({
+      name: `big-${i}.${f.type === 'image/png' ? 'png' : 'jpg'}`,
+      mimeType: f.type,
+      buffer: Buffer.from(f.data, 'base64'),
+    })),
+  );
+  await expect(page.locator('.photo-hit')).toHaveCount(4);
+  await saved(page);
+  const stored = await page.evaluate(async () => {
+    const path = '/src/lib/editor/storage.ts';
+    const storage: typeof import('../apps/web/src/lib/editor/storage') = await import(path);
+    const project = (await storage.loadProject())!;
+    const out = [];
+    for (const a of project.assets) {
+      const master = await createImageBitmap(a.masterBlob);
+      const preview = await createImageBitmap(a.previewBlob);
+      out.push({
+        name: a.name,
+        size: [a.width, a.height],
+        master: [master.width, master.height, a.masterBlob.type],
+        preview: [preview.width, preview.height, a.previewBlob.type],
+      });
+      master.close();
+      preview.close();
+    }
+    return out;
+  });
+  expect(stored[0]).toEqual({
+    name: 'big-0.jpg',
+    size: [4096, 2731],
+    master: [4096, 2731, 'image/jpeg'],
+    preview: [1440, 960, 'image/jpeg'],
+  });
+  expect(stored[1].master).toEqual([400, 300, 'image/png']);
+  expect(stored[2].master).toEqual([300, 400, 'image/jpeg']);
+  expect(stored[3].master).toEqual([3000, 3000, 'image/png']);
+  expect(stored[3].preview).toEqual([1440, 1440, 'image/png']);
+});
+test('touch devices prepare slides first and open the share sheet from a fresh tap', async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    const media = matchMedia.bind(window);
+    window.matchMedia = (q) =>
+      q === '(pointer: coarse)' ? ({ matches: true } as MediaQueryList) : media(q);
+    const shared: unknown[] = [];
+    Object.assign(window, { shared });
+    Object.assign(navigator, {
+      canShare: () => true,
+      share: async ({ files }: { files: File[] }) => {
+        shared.push({ active: navigator.userActivation.isActive, names: files.map((f) => f.name) });
+      },
+    });
+  });
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await upload(page, 3);
+  await page.getByRole('button', { name: /Download images/ }).click();
+  const share = page.getByRole('button', { name: 'Share slides' });
+  await expect(share).toBeVisible();
+  expect((await share.boundingBox())!.height).toBeGreaterThanOrEqual(42);
+  await share.click();
+  await expect(share).toBeHidden();
+  expect(await page.evaluate(() => (window as unknown as { shared: unknown[] }).shared)).toEqual([
+    {
+      active: true,
+      names: ['living-carousel-01.png', 'living-carousel-02.png', 'living-carousel-03.png'],
+    },
+  ]);
+  await page.getByRole('button', { name: /Download images/ }).click();
+  await expect(share).toBeVisible();
+  await page.getByLabel('Export image format').selectOption('jpeg');
+  await expect(share).toBeHidden();
+});
+test('an unreadable saved collage shows an error and is not overwritten by autosave', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await upload(page, 3);
+  await saved(page);
+  const record = (change: boolean) =>
+    page.evaluate(
+      (change) =>
+        new Promise<unknown>((resolve, reject) => {
+          const open = indexedDB.open('living-carousel-v5');
+          open.onerror = () => reject(open.error);
+          open.onsuccess = () => {
+            const store = open.result.transaction('project', 'readwrite').objectStore('project');
+            const get = store.get('active');
+            get.onsuccess = () => {
+              if (change)
+                store.put(
+                  {
+                    ...get.result,
+                    workspace: {
+                      ...get.result.workspace,
+                      bento: { ...get.result.workspace.bento, layers: [null] },
+                    },
+                  },
+                  'active',
+                );
+              resolve(get.result.workspace.bento.layers);
+              open.result.close();
+            };
+          };
+        }),
+      change,
+    );
+  await record(true);
+  await page.reload();
+  await expect(page.getByText('The collage saved on this device is unreadable.')).toBeVisible();
+  await page.evaluate(() => window.dispatchEvent(new Event('pagehide')));
+  await page.waitForTimeout(300);
+  expect(await record(false)).toEqual([null]);
+  // The error tells the user to start a new collage, so that button must work with nothing loaded.
+  await expect(page.getByRole('button', { name: 'New collage' })).toBeEnabled();
+});
+
+async function exported(page: Page) {
+  const pending = page.waitForEvent('download');
+  await page.getByRole('button', { name: /Download images/ }).click();
+  const stream = await (await pending).createReadStream();
+  const chunks = [];
+  for await (const c of stream!) chunks.push(c);
+  const files = unzipSync(Buffer.concat(chunks));
+  return Object.entries(files)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([name, png]) => {
+      const bytes = Buffer.from(png);
+      return { name, bytes, size: [bytes.readUInt32BE(16), bytes.readUInt32BE(20)] };
+    });
+}
+test('ratio and slide count drive layout and export, and each change is one undo step', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await upload(page, 4);
+  const before = (await saved(page)).workspace;
+  const tall = page.getByRole('button', { name: /^9:16/ });
+  await tall.click();
+  await expect(tall).toHaveAttribute('aria-pressed', 'true');
+  await page.getByRole('button', { name: 'Add a slide' }).click();
+  await page.getByRole('button', { name: 'Add a slide' }).click();
+  await expect(page.getByText('5\u00a0slides', { exact: true })).toBeVisible();
+  await expect(page.getByLabel('Your continuous 5-slide collage')).toBeVisible();
+  let w = (await saved(page)).workspace;
+  expect([w.aspect, w.slides]).toEqual(['9:16', 5]);
+  expect(w.layers.map((l) => l.assetId)).toEqual(before.layers.map((l) => l.assetId));
+  const files = await exported(page);
+  expect(files.map((f) => f.name)).toEqual([1, 2, 3, 4, 5].map((n) => `living-carousel-0${n}.png`));
+  for (const f of files) expect(f.size).toEqual([1080, 1920]);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  for (const slides of [4, 3]) {
+    await page.getByRole('button', { name: 'Undo', exact: true }).click();
+    expect((await saved(page)).workspace.slides).toBe(slides);
+  }
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  expect((await saved(page)).workspace).toEqual(before);
+  await page.getByRole('button', { name: 'Remove a slide' }).click();
+  await page.getByRole('button', { name: 'Remove a slide' }).click();
+  await expect(page.getByRole('button', { name: 'Remove a slide' })).toBeDisabled();
+  w = (await saved(page)).workspace;
+  expect(w.slides).toBe(1);
+  for (const l of w.layers) expect(l.x + l.width).toBeLessThanOrEqual(1080);
+  await expect(page.getByText('1 slide,')).toBeAttached();
+  expect(await exported(page)).toHaveLength(1);
+});
+test('an empty collage exports blank background slides, up to 20 in 9:16', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  const blank = await exported(page);
+  expect(blank).toHaveLength(3);
+  for (const f of blank) {
+    expect(f.size).toEqual([1080, 1350]);
+    expect(f.bytes.equals(blank[0].bytes)).toBe(true);
+  }
+  await page.getByRole('button', { name: /^9:16/ }).click();
+  const add = page.getByRole('button', { name: 'Add a slide' });
+  for (let i = 3; i < 20; i++) await add.click();
+  await expect(add).toBeDisabled();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  const files = await exported(page);
+  expect(files.map((f) => f.name).at(-1)).toBe('living-carousel-20.png');
+  for (const f of files) expect(f.size).toEqual([1080, 1920]);
+});
+
+test('a format change during a drag cancels the gesture instead of reverting the format', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await upload(page, 3);
+  await page.getByRole('button', { name: /Scrapbook/ }).click();
+  const before = (await saved(page)).workspace;
+  const photo = page.locator(`[data-layer-id="${before.layers[0].id}"]`);
+  await photo.scrollIntoViewIfNeeded();
+  const b = (await photo.boundingBox())!;
+  await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(b.x + b.width / 2 + 40, b.y + b.height / 2 + 20, { steps: 5 });
+  // A second input (keyboard or another touch) changes the format mid-drag.
+  await page.getByRole('button', { name: /^1:1/ }).evaluate((el) => (el as HTMLElement).click());
+  await page.mouse.move(b.x + b.width / 2 + 80, b.y + b.height / 2 + 40, { steps: 5 });
+  await page.mouse.up();
+  await expect(page.getByRole('button', { name: /^1:1/ })).toHaveAttribute('aria-pressed', 'true');
+  const after = (await saved(page)).workspace;
+  expect(after.aspect).toBe('1:1');
+  expect(after.layers[0].width).toBeCloseTo((before.layers[0].width * 1080) / 1350);
+});
+
+test('canvas zooms at the cursor, pans, centres a slide from the strip and keeps drags exact', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await upload(page, 3);
+  await page.getByRole('button', { name: /Scrapbook/ }).click();
+  const zoom = page.getByLabel('Canvas zoom');
+  const percent = async () => parseInt((await zoom.textContent())!) / 100;
+  const fitted = await zoom.textContent();
+  const canvas = page.getByRole('group', { name: 'Interactive collage canvas' });
+  let box = (await canvas.boundingBox())!;
+  await page.mouse.move(box.x + 20, box.y + box.height / 2);
+  await page.keyboard.down('Control');
+  await page.mouse.wheel(0, -200);
+  await page.keyboard.up('Control');
+  await expect(zoom).not.toHaveText(fitted!);
+  expect(await percent()).toBeGreaterThan(parseInt(fitted!) / 100);
+
+  await page.getByRole('button', { name: 'Show slide 3' }).click();
+  await expect(page.getByRole('button', { name: 'Show slide 3' })).toHaveAttribute(
+    'aria-current',
+    'true',
+  );
+  // The strip sits below the canvas, so clicking it may scroll the page.
+  box = (await canvas.boundingBox())!;
+  const stage = (await page.locator('.photo-hit').first().locator('..').boundingBox())!;
+  const scale = stage.width / (3 * 1080);
+  // Slide 3's centre sits at the viewport's centre.
+  expect(stage.x + 2.5 * 1080 * scale).toBeCloseTo(box.x + box.width / 2, 0);
+  // A horizontal wheel pans the zoomed view.
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.wheel(-80, 0);
+  await expect
+    .poll(async () => (await page.locator('.photo-hit').first().locator('..').boundingBox())!.x)
+    .toBeCloseTo(stage.x + 80, 0);
+
+  const before = (await saved(page)).workspace;
+  const layer = before.layers.find((l) => l.x >= 2 * 1080)!;
+  const photo = page.locator(`[data-layer-id="${layer.id}"]`);
+  const b = (await photo.boundingBox())!;
+  await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(b.x + b.width / 2 - 60, b.y + b.height / 2 + 30, { steps: 8 });
+  await page.mouse.up();
+  await expect
+    .poll(async () => (await saved(page)).workspace.layers.find((l) => l.id === layer.id)!.x)
+    .toBeCloseTo(layer.x - 60 / scale, -1);
+  const moved = (await saved(page)).workspace.layers.find((l) => l.id === layer.id)!;
+  expect(moved.y - layer.y).toBeCloseTo(30 / scale, -1);
+
+  await page.keyboard.press('0');
+  await expect(zoom).toHaveText(fitted!);
+  await expect(page.getByRole('button', { name: 'Show slide 2' })).toHaveAttribute(
+    'aria-current',
+    'true',
+  );
+});
+
+test('tabbing to a photo or divider outside the zoomed view pans it into view', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await upload(page, 6);
+  await expect(page.getByLabel('Your continuous 3-slide collage')).toBeVisible();
+  await page.getByRole('button', { name: 'Show slide 1' }).click();
+  const canvas = page.getByRole('group', { name: 'Interactive collage canvas' });
+  let box = (await canvas.boundingBox())!;
+  const inside = (b: { x: number; y: number; width: number; height: number }) =>
+    b.x >= box.x - 1 &&
+    b.y >= box.y - 1 &&
+    b.x + b.width <= box.x + box.width + 1 &&
+    b.y + b.height <= box.y + box.height + 1;
+  const hidden: string[] = [];
+  for (const photo of await page.locator('.photo-hit').all())
+    if (!inside((await photo.boundingBox())!))
+      hidden.push((await photo.getAttribute('data-layer-id'))!);
+  expect(hidden.length).toBeGreaterThan(0);
+  // Walk backwards from the slide strip through every divider and photo.
+  const seen: string[] = [];
+  for (let i = 0; i < 40; i++) {
+    await page.keyboard.press('Shift+Tab');
+    const focused = page.locator('.photo-hit:focus, .divider-handle:focus');
+    if (!(await focused.count())) {
+      if (seen.length) break;
+      continue;
+    }
+    const id = await focused.getAttribute('data-layer-id');
+    if (id) seen.push(id);
+    else seen.push('divider');
+    // Focus may scroll the page, so measure both again.
+    box = (await canvas.boundingBox())!;
+    expect(inside((await focused.boundingBox())!)).toBe(true);
+  }
+  expect(seen).toEqual(expect.arrayContaining(hidden));
+});
+
+// Reads an exported PNG's pixel in the page, since Node has no decoder here.
+const pixel = (page: Page, png: Buffer, x: number, y: number) =>
+  page.evaluate(
+    async ({ data, x, y }) => {
+      const blob = await (await fetch('data:image/png;base64,' + data)).blob();
+      const image = await createImageBitmap(blob);
+      const canvas = document.createElement('canvas');
+      canvas.width = image.width;
+      canvas.height = image.height;
+      const ctx = canvas.getContext('2d')!;
+      ctx.drawImage(image, 0, 0);
+      return [...ctx.getImageData(x, y, 1, 1).data].slice(0, 3);
+    },
+    { data: png.toString('base64'), x, y },
+  );
+test('deleting a Bento cell returns its photo to the tray in one undo step and add back splits a cell', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await upload(page, 4);
+  const before = await saved(page);
+  const [first, ...others] = before.workspace.layers;
+  const name = before.assets.find((a) => a.id === first.assetId)!.name;
+  await page.locator(`[data-layer-id="${first.id}"]`).click();
+  await page.getByRole('button', { name: 'Delete photo', exact: true }).click();
+  await expect(page.locator('.photo-hit')).toHaveCount(3);
+  await expect(page.getByRole('button', { name: `Add back ${name}`, exact: true })).toBeVisible();
+  let w = (await saved(page)).workspace;
+  expect(w.layers.map((l) => l.id)).toEqual(others.map((l) => l.id));
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expect(page.locator('.photo-hit')).toHaveCount(4);
+  await expect(page.getByRole('button', { name: `Select ${name}`, exact: true })).toBeVisible();
+  expect((await saved(page)).workspace).toEqual(before.workspace);
+  // The keyboard deletes too.
+  await page.locator(`[data-layer-id="${first.id}"]`).click();
+  await page.keyboard.press('Delete');
+  await expect(page.locator('.photo-hit')).toHaveCount(3);
+  w = (await saved(page)).workspace;
+  const largest = [...w.layers].sort((a, b) => b.width * b.height - a.width * a.height)[0];
+  await page.getByRole('button', { name: `Add back ${name}`, exact: true }).click();
+  await expect(page.locator('.photo-hit')).toHaveCount(4);
+  const after = (await saved(page)).workspace;
+  expect(after.layers.at(-1)!.assetId).toBe(first.assetId);
+  const split = after.layers.find((l) => l.id === largest.id)!;
+  expect(split.width * split.height).toBeLessThan((largest.width * largest.height) / 1.9);
+  for (const l of w.layers)
+    if (l.id !== largest.id) expect(after.layers.find((c) => c.id === l.id)).toEqual(l);
+  // Delete down to nothing: background only.
+  for (const l of after.layers) {
+    await page.locator(`[data-layer-id="${l.id}"]`).click();
+    await page.getByRole('button', { name: 'Delete photo', exact: true }).click();
+  }
+  await expect(page.locator('.photo-hit')).toHaveCount(0);
+  await expect(page.locator('.count')).toHaveText('4/100');
+});
+test('uploads fill Bento by splitting, the rest wait in the tray and add back is then blocked', async ({
+  page,
+}) => {
+  test.setTimeout(60_000);
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await page.getByRole('button', { name: /^1:1/ }).click();
+  await page.getByRole('button', { name: 'Remove a slide' }).click();
+  await page.getByRole('button', { name: 'Remove a slide' }).click();
+  await upload(page, 6);
+  await dispatchFiles(page, 'drop', 45);
+  await expect(page.locator('.count')).toHaveText('51/100');
+  await expect(page.getByRole('status').filter({ hasText: 'did not fit' })).toBeVisible();
+  const placed = await page.locator('.photo-hit').count();
+  expect(placed).toBeGreaterThan(6);
+  expect(placed).toBeLessThan(51);
+  const w = (await saved(page)).workspace;
+  for (const l of w.layers) expect(Math.min(l.width, l.height)).toBeGreaterThanOrEqual(120);
+  // Scrapbook has no minimum, so it took every upload.
+  expect(w.scrapbook.layers).toHaveLength(51);
+  await page
+    .getByRole('button', { name: /^Add back / })
+    .first()
+    .click();
+  await expect(page.getByRole('alert')).toContainText('under 120px');
+  await expect(page.locator('.photo-hit')).toHaveCount(placed);
+});
+test('spacing sliders preview live, commit once and export at full width', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await upload(page, 4);
+  const before = (await saved(page)).workspace;
+  const gap = page.getByLabel('Gap', { exact: true });
+  await expect(gap).toHaveValue('12');
+  await expect(page.getByLabel('Outer margin', { exact: true })).toHaveValue('24');
+  await expect(page.getByLabel('Roundness', { exact: true })).toHaveValue('0');
+  // Input events alone preview without a history step or a save.
+  await gap.evaluate((el: HTMLInputElement) => {
+    for (const value of ['20', '30', '40']) {
+      el.value = value;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  });
+  await expect(page.getByText('40px', { exact: true })).toBeVisible();
+  expect((await saved(page)).workspace.bento.gap).toBe(12);
+  await gap.evaluate((el) => el.dispatchEvent(new Event('change', { bubbles: true })));
+  await expect.poll(async () => (await saved(page)).workspace.bento.gap).toBe(40);
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  expect((await saved(page)).workspace).toEqual(before);
+  await gap.fill('0');
+  await expect.poll(async () => (await saved(page)).workspace.bento.gap).toBe(0);
+  await page.getByLabel('Roundness', { exact: true }).fill('30');
+  await expect.poll(async () => (await saved(page)).workspace.bento.radius).toBe(30);
+  const zero = (await saved(page)).workspace;
+  // Dividers stay usable with no gap to sit in.
+  const handle = page.locator('.divider-handle').first();
+  const label = (await handle.getAttribute('aria-label'))!;
+  await drag(page, `[aria-label="${label}"]`, 30, 30);
+  await expect
+    .poll(async () => (await saved(page)).workspace.layers.map((l) => [l.width, l.height]))
+    .not.toEqual(zero.layers.map((l) => [l.width, l.height]));
+  const files = await exported(page);
+  expect(files).toHaveLength(3);
+  for (const f of files) expect(f.size).toEqual([1080, 1350]);
+  // The editor paints the photos, not only the background.
+  await expect
+    .poll(() =>
+      page.getByLabel('Your continuous 3-slide collage').evaluate((el) => {
+        const c = el as HTMLCanvasElement;
+        const { data } = c.getContext('2d')!.getImageData(0, 0, c.width, c.height);
+        const colors = new Set<number>();
+        for (let i = 0; i < data.length; i += 400)
+          colors.add(data[i] * 65536 + data[i + 1] * 256 + data[i + 2]);
+        return colors.size;
+      }),
+    )
+    .toBeGreaterThan(20);
+  await page.screenshot({ path: 'test-results/bento-spacing.png', fullPage: true });
+  const w = (await saved(page)).workspace;
+  await page.reload();
+  await expect(page.getByLabel('Gap', { exact: true })).toHaveValue('0');
+  expect((await saved(page)).workspace).toEqual(w);
+});
+test('a Bento divider dragged to its limit saves, reloads and stays valid', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await upload(page, 4);
+  const before = (await saved(page)).workspace;
+  const label = (await page.locator('.divider-handle').first().getAttribute('aria-label'))!;
+  await drag(page, `[aria-label="${label}"]`, -5000, -5000);
+  await expect
+    .poll(async () => (await saved(page)).workspace.layers.map((l) => [l.width, l.height]))
+    .not.toEqual(before.layers.map((l) => [l.width, l.height]));
+  const w = (await saved(page)).workspace;
+  expect(Math.min(...w.layers.flatMap((l) => [l.width, l.height]))).toBeCloseTo(120, 6);
+  await page.reload();
+  await expect(page.locator('.photo-hit')).toHaveCount(4);
+  await expect(page.getByText('The collage saved on this device is unreadable.')).toHaveCount(0);
+  expect((await saved(page)).workspace).toEqual(w);
+});
+test('the background swatch and picker set exported margin pixels in both styles', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await upload(page, 3);
+  expect(await pixel(page, (await exported(page))[0].bytes, 5, 5)).toEqual([0xf3, 0xee, 0xe4]);
+  await page.getByRole('button', { name: 'Ink background' }).click();
+  await expect.poll(async () => (await saved(page)).workspace.background).toBe('#1c1a17');
+  expect(await pixel(page, (await exported(page))[0].bytes, 5, 5)).toEqual([0x1c, 0x1a, 0x17]);
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expect.poll(async () => (await saved(page)).workspace.background).toBe('#f3eee4');
+  await page.getByLabel('Custom background color').fill('#336699');
+  await expect.poll(async () => (await saved(page)).workspace.background).toBe('#336699');
+  expect(await pixel(page, (await exported(page))[0].bytes, 5, 5)).toEqual([0x33, 0x66, 0x99]);
+  // Shuffle and a style switch keep the color.
+  await page.getByRole('button', { name: /Shuffle layout/ }).click();
+  await page.getByRole('button', { name: /Scrapbook/ }).click();
+  await expect.poll(async () => (await saved(page)).workspace.background).toBe('#336699');
+});
+test('switching style restores each layout and new photos reach both', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await upload(page, 4);
+  await page.getByLabel('Gap', { exact: true }).fill('30');
+  await expect.poll(async () => (await saved(page)).workspace.bento.gap).toBe(30);
+  await page.getByRole('button', { name: /Scrapbook/ }).click();
+  const scrap = (await saved(page)).workspace;
+  await drag(page, `[data-layer-id="${scrap.layers[1].id}"]`, 60, 25);
+  await expect
+    .poll(async () => (await saved(page)).workspace.layers[1].x)
+    .not.toBe(scrap.layers[1].x);
+  const moved = (await saved(page)).workspace;
+  await page.getByRole('button', { name: /Bento/ }).click();
+  await expect(page.getByLabel('Gap', { exact: true })).toHaveValue('30');
+  const bento = (await saved(page)).workspace;
+  expect(bento.bento).toEqual(moved.bento);
+  expect(bento.layers).toEqual(moved.bento.layers);
+  await page.getByRole('button', { name: /Scrapbook/ }).click();
+  await expect.poll(async () => (await saved(page)).workspace.style).toBe('scrapbook');
+  expect((await saved(page)).workspace.layers).toEqual(moved.layers);
+  // A photo added here is placed in the Bento layout as well.
+  await page.getByLabel('Upload photos').setInputFiles({
+    name: 'late.png',
+    mimeType: 'image/png',
+    buffer: Buffer.from(
+      await page.evaluate(() => {
+        const c = document.createElement('canvas');
+        c.width = c.height = 200;
+        return c.toDataURL().split(',')[1];
+      }),
+      'base64',
+    ),
+  });
+  await expect(page.locator('.photo-hit')).toHaveCount(5);
+  const both = await saved(page);
+  const late = both.assets.find((a) => a.name === 'late.png')!;
+  expect(both.workspace.scrapbook.layers.some((l) => l.assetId === late.id)).toBe(true);
+  expect(both.workspace.bento.layers.some((l) => l.assetId === late.id)).toBe(true);
+  // Removing it from the library clears both layouts, undo history and the device.
+  page.once('dialog', (d) => d.accept());
+  await page.getByRole('button', { name: 'Remove late.png from library' }).click();
+  await expect(page.locator('.photo-hit')).toHaveCount(4);
+  await expect(page.locator('.count')).toHaveText('4/100');
+  const gone = await saved(page);
+  expect(gone.assets.some((a) => a.id === late.id)).toBe(false);
+  expect(gone.workspace.bento.layers.some((l) => l.assetId === late.id)).toBe(false);
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expect(page.locator('.photo-hit')).toHaveCount(4);
+  const stored = await page.evaluate(
+    () =>
+      new Promise<number>((resolve) => {
+        const open = indexedDB.open('living-carousel-v5');
+        open.onsuccess = () => {
+          const count = open.result.transaction('assets').objectStore('assets').count();
+          count.onsuccess = () => {
+            open.result.close();
+            resolve(count.result);
+          };
+        };
+      }),
+  );
+  expect(stored).toBe(4);
+});
+
+// Rows in an exported PNG's column band whose pixels differ from the background.
+const inkRows = (page: Page, png: Buffer, from: number, to: number, background: number[]) =>
+  page.evaluate(
+    async ({ data, from, to, background }) => {
+      const blob = await (await fetch('data:image/png;base64,' + data)).blob();
+      const image = await createImageBitmap(blob);
+      const canvas = document.createElement('canvas');
+      canvas.width = image.width;
+      canvas.height = image.height;
+      const ctx = canvas.getContext('2d')!;
+      ctx.drawImage(image, 0, 0);
+      const pixels = ctx.getImageData(from, 0, to - from, image.height).data;
+      const rows = new Set<number>();
+      for (let i = 0; i < pixels.length; i += 4)
+        if ([0, 1, 2].some((c) => Math.abs(pixels[i + c] - background[c]) > 40))
+          rows.add(Math.floor(i / 4 / (to - from)));
+      return [...rows];
+    },
+    { data: png.toString('base64'), from, to, background },
+  );
+const CREAM = [0xf3, 0xee, 0xe4];
+async function addText(page: Page) {
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await page.getByRole('button', { name: 'Add text', exact: true }).click();
+  await expect(page.locator('.text-hit')).toHaveCount(1);
+  await expect(page.getByLabel('Text', { exact: true })).toBeFocused();
+}
+const textLayer = async (page: Page) => (await saved(page)).workspace.overlays[0];
+test('text is edited in the side panel, crosses a seam, exports on both slides, reloads and undoes', async ({
+  page,
+}) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.goto('/');
+  await addText(page);
+  // Added to the middle of the slide in view, as one history step.
+  let t = await textLayer(page);
+  expect(t.x + t.width / 2).toBeCloseTo(1620);
+  expect(t.y + t.height / 2).toBeCloseTo(675);
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expect(page.locator('.text-hit')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Redo', exact: true }).click();
+  await page.locator('.text-hit').click();
+
+  // A burst of typing is one history step, and the box height follows the wrapped lines.
+  const field = page.getByLabel('Text', { exact: true });
+  const before = (await textLayer(page)).text;
+  await field.focus();
+  await field.fill('');
+  await field.pressSequentially('MMMMMMMM MMMMMMMM', { delay: 5 });
+  await expect.poll(async () => (await textLayer(page)).text).toBe('MMMMMMMM MMMMMMMM');
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expect(field).toHaveValue(before);
+  await page.getByRole('button', { name: 'Redo', exact: true }).click();
+  await expect(field).toHaveValue('MMMMMMMM MMMMMMMM');
+  await page.getByLabel('Font', { exact: true }).selectOption('Playfair Display');
+  await page.getByLabel('Text size').fill('150');
+  await page.getByRole('button', { name: 'Coral text' }).click();
+  await page.getByRole('button', { name: 'Bold' }).click();
+  await page.getByRole('button', { name: 'left', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'left', exact: true })).toHaveAttribute(
+    'aria-pressed',
+    'true',
+  );
+  await expect.poll(async () => (await textLayer(page)).align).toBe('left');
+  t = await textLayer(page);
+  expect(t).toMatchObject({
+    fontFamily: 'Playfair Display',
+    size: 150,
+    color: '#e4572e',
+    bold: true,
+  });
+  // 16 wide capitals at 150px cannot fit 720 on one line.
+  expect(t.height).toBeGreaterThan(150 * 1.25 * 1.5);
+
+  // Fonts missing a face disable the toggle and draw without it.
+  await page.getByLabel('Font', { exact: true }).selectOption('Anton');
+  await expect(page.getByRole('button', { name: 'Bold' })).toBeDisabled();
+  await expect(page.getByRole('button', { name: 'Italic' })).toBeDisabled();
+  await page.getByLabel('Font', { exact: true }).selectOption('Playfair Display');
+  await expect(page.getByRole('button', { name: 'Bold' })).toHaveAttribute('aria-pressed', 'true');
+
+  // Controls stay readable and big enough to hit.
+  for (const name of ['Bold', 'Layer up', 'Delete text', 'Coral text'])
+    expect((await page.getByRole('button', { name }).boundingBox())!.height).toBeGreaterThanOrEqual(
+      42,
+    );
+  const sizes = await page
+    .getByRole('region', { name: 'Edit text' })
+    .locator('label, button, select, textarea')
+    .evaluateAll((nodes) => nodes.map((n) => parseFloat(getComputedStyle(n).fontSize)));
+  expect(Math.min(...sizes)).toBeGreaterThanOrEqual(14);
+
+  // Drag across the seam between slides 2 and 3.
+  t = await textLayer(page);
+  const hit = page.locator('.text-hit');
+  const scale = (await hit.boundingBox())!.width / t.width;
+  const distance = 2160 - (t.x + t.width / 2);
+  await drag(page, '.text-hit', distance * scale, 0);
+  await expect.poll(async () => (await textLayer(page)).x).not.toBe(t.x);
+  t = await textLayer(page);
+  expect(t.x).toBeLessThan(2160);
+  expect(t.x + t.width).toBeGreaterThan(2160);
+
+  // Pixels appear on both sides of the seam, on the same rows, and match the editor paint exactly.
+  const files = await exported(page);
+  const left = await inkRows(page, files[1].bytes, 1040, 1080, CREAM);
+  const right = await inkRows(page, files[2].bytes, 0, 40, CREAM);
+  expect(left.length).toBeGreaterThan(20);
+  expect(left.filter((y) => right.includes(y)).length).toBeGreaterThan(20);
+  expect(await inkRows(page, files[0].bytes, 0, 1080, CREAM)).toEqual([]);
+  const worst = await page.evaluate(
+    async (encoded) => {
+      const storage = await import('/src/lib/editor/storage.ts' as string);
+      const renderer = await import('/src/lib/editor/render.ts' as string);
+      const project = await storage.loadProject();
+      const view = Object.assign(document.createElement('canvas'), { width: 3240, height: 1350 });
+      await renderer.loadFonts(project.workspace.overlays);
+      renderer.paint(project, new Map(), view, { x: 0, y: 0, scale: 1 });
+      const strip = Object.assign(document.createElement('canvas'), { width: 3240, height: 1350 });
+      for (let i = 0; i < encoded.length; i++) {
+        const blob = await (await fetch('data:image/png;base64,' + encoded[i])).blob();
+        strip.getContext('2d')!.drawImage(await createImageBitmap(blob), i * 1080, 0);
+      }
+      const a = view.getContext('2d')!.getImageData(0, 0, 3240, 1350).data;
+      const b = strip.getContext('2d')!.getImageData(0, 0, 3240, 1350).data;
+      let max = 0;
+      for (let p = 0; p < a.length; p++) max = Math.max(max, Math.abs(a[p] - b[p]));
+      return max;
+    },
+    files.map((f) => f.bytes.toString('base64')),
+  );
+  expect(worst).toBeLessThanOrEqual(1);
+
+  // Shared across styles and through a reload.
+  await page.getByRole('button', { name: /Scrapbook/ }).click();
+  await expect(page.locator('.text-hit')).toHaveCount(1);
+  expect(await textLayer(page)).toEqual(t);
+  const final = (await saved(page)).workspace;
+  await page.reload();
+  await expect(page.locator('.text-hit')).toHaveCount(1);
+  expect((await saved(page)).workspace).toEqual(final);
+  await page.getByRole('button', { name: /Bento/ }).click();
+  await expect(page.locator('.text-hit')).toHaveCount(1);
+
+  // Delete is one undo step; double-click and the keyboard reach the same layer.
+  await page.locator('.text-hit').click();
+  await page.keyboard.press('Delete');
+  await expect(page.locator('.text-hit')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expect(page.locator('.text-hit')).toHaveCount(1);
+  expect(await textLayer(page)).toEqual(t);
+  await page.locator('.text-hit').dblclick();
+  await expect(field).toBeFocused();
+  await page.screenshot({ path: 'test-results/text-panel.png', fullPage: true });
+  expect(errors).toEqual([]);
+});
+test('text moves, resizes, rotates and nudges in Bento without swapping photos', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await upload(page, 3);
+  await addText(page);
+  const photos = (await saved(page)).workspace.layers;
+  await page.locator('.text-hit').click();
+  // Nudges move the text, and never swap the photos beneath it.
+  let t = await textLayer(page);
+  await page.keyboard.press('ArrowRight');
+  await page.keyboard.press('Shift+ArrowDown');
+  await expect.poll(async () => (await textLayer(page)).x).toBe(t.x + 1);
+  expect((await textLayer(page)).y).toBe(t.y + 10);
+  expect((await saved(page)).workspace.layers).toEqual(photos);
+  // A width handle rewraps: the box narrows and grows taller, and the font size stays.
+  t = await textLayer(page);
+  await page.getByLabel('Text', { exact: true }).fill('Several words wrapping here');
+  await expect.poll(async () => (await textLayer(page)).text).toContain('wrapping');
+  await page.locator('.text-hit').click();
+  t = await textLayer(page);
+  await drag(page, '[aria-label="Resize text width e"]', -60, 0);
+  await expect.poll(async () => (await textLayer(page)).width).toBeLessThan(t.width);
+  const narrow = await textLayer(page);
+  expect(narrow.height).toBeGreaterThan(t.height);
+  expect(narrow.size).toBe(t.size);
+  expect(narrow.x).toBeCloseTo(t.x);
+  await drag(page, '[aria-label="Rotate text"]', 80, 60);
+  await expect.poll(async () => (await textLayer(page)).rotation).not.toBe(0);
+  const turned = await textLayer(page);
+  // Selection follows rotation: the middle of the turned button still grabs it.
+  const box = (await page.locator('.text-hit').boundingBox())!;
+  await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+  await expect(page.locator('.text-hit')).toHaveAttribute('aria-pressed', 'true');
+  await drag(page, '.text-hit', 30, 10);
+  await expect.poll(async () => (await textLayer(page)).x).not.toBe(turned.x);
+  expect((await saved(page)).workspace.layers).toEqual(photos);
+  // A format change scales it with the slide and keeps it valid across a reload.
+  await page.getByRole('button', { name: /^1:1/ }).click();
+  await expect.poll(async () => (await textLayer(page)).size).toBeLessThan(t.size);
+  const scaled = await textLayer(page);
+  await page.reload();
+  await expect(page.locator('.text-hit')).toHaveCount(1);
+  expect(await textLayer(page)).toEqual(scaled);
+});
+test('layer order changes which of a photo and text wins the pixels in Scrapbook and Bento text order', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await upload(page, 1);
+  await page.getByRole('button', { name: /Scrapbook/ }).click();
+  await saved(page);
+  await page.getByLabel('Photo width', { exact: true }).fill('800');
+  await page.getByLabel('Photo width', { exact: true }).press('Tab');
+  await page.getByLabel('Photo rotation', { exact: true }).fill('0');
+  await page.getByLabel('Photo rotation', { exact: true }).press('Tab');
+  const photo = (await saved(page)).workspace.layers[0];
+  await page
+    .getByLabel('Photo position X', { exact: true })
+    .fill(String(Math.round(1620 - photo.width / 2)));
+  await page.getByLabel('Photo position X', { exact: true }).press('Tab');
+  await page
+    .getByLabel('Photo position Y', { exact: true })
+    .fill(String(Math.round(675 - photo.height / 2)));
+  await page.getByLabel('Photo position Y', { exact: true }).press('Tab');
+  await addText(page);
+  await page.getByLabel('Highlight', { exact: true }).check();
+  await page.getByLabel('Highlight color').fill('#ff0000');
+  await expect.poll(async () => (await textLayer(page)).highlight).toBe('#ff0000');
+  // The pill reaches well left of the word's own first glyph, at the box's vertical centre.
+  const t = await textLayer(page);
+  const at = async () => pixel(page, (await exported(page))[1].bytes, 540, Math.round(t.y + 8));
+  expect(await at()).toEqual([255, 0, 0]);
+  await page.getByRole('button', { name: 'Layer down', exact: true }).click();
+  await expect.poll(async () => (await saved(page)).workspace.scrapbook.order[0]).toBe(t.id);
+  await expect(page.getByRole('button', { name: 'Layer down', exact: true })).toBeDisabled();
+  expect(await at()).not.toEqual([255, 0, 0]);
+  await page.getByRole('button', { name: 'Layer up', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Layer up', exact: true })).toBeDisabled();
+  expect(await at()).toEqual([255, 0, 0]);
+  // Text buttons stack the same way, so the frontmost layer takes the pointer.
+  const undoDown = async () => {
+    await page.getByRole('button', { name: 'Layer down', exact: true }).click();
+    await expect.poll(async () => (await saved(page)).workspace.scrapbook.order[0]).toBe(t.id);
+  };
+  await undoDown();
+  const z = (selector: string) =>
+    page.locator(selector).evaluate((el) => +getComputedStyle(el).zIndex);
+  expect(await z('.text-hit')).toBeLessThan(await z('.photo-hit'));
+  // Bento keeps text above its grid, whatever the Scrapbook order.
+  await page.getByRole('button', { name: /Bento/ }).click();
+  await expect(page.locator('.text-hit')).toHaveCount(1);
+  expect(await z('.text-hit')).toBeGreaterThan(await z('.photo-hit'));
+  expect(await pixel(page, (await exported(page))[1].bytes, 540, Math.round(t.y + 8))).toEqual([
+    255, 0, 0,
+  ]);
+});
+test('a font that cannot load fails visibly in the panel, the preview and export', async ({
+  page,
+}) => {
+  await page.goto('/');
+  await addText(page);
+  await page.route('**/fonts/anton-*', (route) => route.abort());
+  await page.getByLabel('Font', { exact: true }).selectOption('Anton');
+  await expect(page.getByRole('alert')).toContainText('The font Anton could not load');
+  await expect(page.getByLabel('Font', { exact: true })).toHaveValue('DM Sans');
+  expect((await textLayer(page)).fontFamily).toBe('DM Sans');
+  await page.unroute('**/fonts/anton-*');
+  await page.reload();
+  await expect(page.locator('.text-hit')).toHaveCount(1);
+  await page.locator('.text-hit').click();
+  await page.getByLabel('Font', { exact: true }).selectOption('Anton');
+  await expect.poll(async () => (await textLayer(page)).fontFamily).toBe('Anton');
+  await page.route('**/fonts/anton-*', (route) => route.abort());
+  await page.reload();
+  await expect(page.getByRole('alert')).toContainText('The font Anton could not load');
+  await page.getByRole('button', { name: 'Dismiss error' }).click();
+  await page.getByRole('button', { name: /Download images/ }).click();
+  await expect(page.getByRole('alert')).toContainText('The font Anton could not load');
+});
+// Holds document.fonts.load for these families until release(family), on every load of the page.
+async function holdFonts(page: Page, families: string[]) {
+  await page.addInitScript((families) => {
+    const load = document.fonts.load.bind(document.fonts);
+    const held: Record<string, () => void> = {};
+    Object.assign(window, { heldFonts: held });
+    document.fonts.load = (font, text) => {
+      const family = families.find((f) => font.includes(`"${f}"`));
+      if (!family) return load(font, text);
+      return new Promise((resolve) => {
+        const previous = held[family];
+        held[family] = () => {
+          previous?.();
+          resolve(load(font, text));
+        };
+      });
+    };
+  }, families);
+}
+type Held = { heldFonts: Record<string, () => void> };
+const heldFont = (page: Page, family: string) =>
+  page.waitForFunction((family) => !!(window as unknown as Held).heldFonts[family], family);
+const releaseFont = (page: Page, family: string) =>
+  page.evaluate((family) => (window as unknown as Held).heldFonts[family](), family);
+// Edits the stored text from a blank same-origin page, where no editor can overwrite it, then opens the editor.
+async function reopenWithText(page: Page, patch: Record<string, unknown>) {
+  await saved(page);
+  await page.route('**/blank', (route) => route.fulfill({ contentType: 'text/html', body: '' }));
+  await page.goto('/blank');
+  await page.evaluate(async (patch) => {
+    const path = '/src/lib/editor/storage.ts';
+    const storage: typeof import('../apps/web/src/lib/editor/storage') = await import(path);
+    const project = (await storage.loadProject())!;
+    project.workspace.overlays = [{ ...project.workspace.overlays[0], ...patch }];
+    await storage.saveProject(project);
+  }, patch);
+  await page.goto('/');
+  await expect(page.locator('.text-hit')).toHaveCount(1);
+}
+// Retyping once fonts are ready measures with the real font, independently of the correction.
+async function realHeight(page: Page) {
+  await page.locator('.text-hit').click();
+  const field = page.getByLabel('Text', { exact: true });
+  const value = await field.inputValue();
+  await field.fill(`${value}!`);
+  await expect.poll(async () => (await textLayer(page)).text).toBe(`${value}!`);
+  await field.fill(value);
+  await expect.poll(async () => (await textLayer(page)).text).toBe(value);
+  return (await textLayer(page)).height;
+}
+const LONG_TEXT = 'MMMM MMMM MMMM MMMM MMMM MMMM MMMM MMMM MMMM MMMM';
+test('a font choice overtaken by a newer choice, undo or deselection never lands', async ({
+  page,
+}) => {
+  await holdFonts(page, [
+    'Anton',
+    'Caveat',
+    'Playfair Display',
+    'Space Grotesk',
+    'Instrument Serif',
+  ]);
+  await page.goto('/');
+  await addText(page);
+  const font = page.getByLabel('Font', { exact: true });
+  await font.selectOption('Anton');
+  await heldFont(page, 'Anton');
+  await font.selectOption('Caveat');
+  await heldFont(page, 'Caveat');
+  await releaseFont(page, 'Caveat');
+  await expect.poll(async () => (await textLayer(page)).fontFamily).toBe('Caveat');
+  // The older choice finishing last changes nothing.
+  await releaseFont(page, 'Anton');
+  await page.waitForTimeout(100);
+  expect((await textLayer(page)).fontFamily).toBe('Caveat');
+  await expect(font).toHaveValue('Caveat');
+  // Undo while a face loads wins: no surprise commit, and redo survives.
+  await font.selectOption('Playfair Display');
+  await heldFont(page, 'Playfair Display');
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expect(font).toHaveValue('DM Sans');
+  await releaseFont(page, 'Playfair Display');
+  await page.waitForTimeout(100);
+  await expect(font).toHaveValue('DM Sans');
+  expect((await textLayer(page)).fontFamily).toBe('DM Sans');
+  const redo = page.getByRole('button', { name: 'Redo', exact: true });
+  await expect(redo).toBeEnabled();
+  await redo.click();
+  await expect(font).toHaveValue('Caveat');
+  // So does clearing the selection.
+  await font.selectOption('Space Grotesk');
+  await heldFont(page, 'Space Grotesk');
+  await page
+    .getByRole('group', { name: 'Interactive collage canvas' })
+    .click({ position: { x: 5, y: 5 } });
+  await expect(page.getByLabel('Font', { exact: true })).toHaveCount(0);
+  await releaseFont(page, 'Space Grotesk');
+  await page.waitForTimeout(100);
+  expect((await textLayer(page)).fontFamily).toBe('Caveat');
+  // An edit to something else during the load merges with it, and both land.
+  await page.locator('.text-hit').click();
+  await font.selectOption('Instrument Serif');
+  await heldFont(page, 'Instrument Serif');
+  await page.getByRole('button', { name: 'left', exact: true }).click();
+  await expect.poll(async () => (await textLayer(page)).align).toBe('left');
+  await releaseFont(page, 'Instrument Serif');
+  await expect.poll(async () => (await textLayer(page)).fontFamily).toBe('Instrument Serif');
+  expect((await textLayer(page)).align).toBe('left');
+});
+test('a ratio change on a cold font keeps real-font heights and exports the neighbouring slide', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.goto('/');
+  await addText(page);
+  await page.getByLabel('Text', { exact: true }).fill(LONG_TEXT);
+  await page.getByLabel('Font', { exact: true }).selectOption('Anton');
+  await expect.poll(async () => (await textLayer(page)).fontFamily).toBe('Anton');
+  // At -90° height grows rightwards: one stored line leaves the text short of slide 2 by culling's reach; the real height crosses the seam.
+  await holdFonts(page, ['Anton']);
+  await reopenWithText(page, { rotation: -90, size: 72, width: 240, height: 90, x: 640, y: 600 });
+  await heldFont(page, 'Anton');
+  await page.getByRole('button', { name: /^1:1/ }).click();
+  // Nothing measured the fallback font: 90px is just scaled by 1080/1350.
+  await expect.poll(async () => (await textLayer(page)).height).toBeCloseTo(72);
+  const pending = exported(page);
+  await page.waitForTimeout(100);
+  await releaseFont(page, 'Anton');
+  const [, second] = await pending;
+  await expect.poll(async () => (await textLayer(page)).height).toBeGreaterThan(72 * 4);
+  expect(await realHeight(page)).toBeCloseTo((await textLayer(page)).height);
+  expect((await inkRows(page, second.bytes, 0, 40, CREAM)).length).toBeGreaterThan(0);
+});
+test('typing and a width drag on a cold font settle to the real-font height outside history', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.goto('/');
+  await addText(page);
+  await page.getByLabel('Font', { exact: true }).selectOption('Anton');
+  await expect.poll(async () => (await textLayer(page)).fontFamily).toBe('Anton');
+  await saved(page);
+  await holdFonts(page, ['Anton']);
+  await page.reload();
+  await expect(page.locator('.text-hit')).toHaveCount(1);
+  await heldFont(page, 'Anton');
+  const start = await textLayer(page);
+  await page.locator('.text-hit').click();
+  await page.getByLabel('Text', { exact: true }).fill(LONG_TEXT);
+  await expect.poll(async () => (await textLayer(page)).text).toBe(LONG_TEXT);
+  await page.locator('.text-hit').click();
+  await drag(page, '[aria-label="Resize text width e"]', -60, 0);
+  await expect.poll(async () => (await textLayer(page)).width).toBeLessThan(start.width);
+  const narrow = await textLayer(page);
+  expect(narrow.height).toBe(start.height);
+  await releaseFont(page, 'Anton');
+  await expect.poll(async () => (await textLayer(page)).height).toBeGreaterThan(start.height);
+  // The correction took no history step: one undo goes straight back past the width drag.
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expect.poll(async () => (await textLayer(page)).width).toBe(start.width);
+  await page.getByRole('button', { name: 'Redo', exact: true }).click();
+  await expect.poll(async () => (await textLayer(page)).width).toBe(narrow.width);
+  const fixed = await textLayer(page);
+  expect(await realHeight(page)).toBeCloseTo(fixed.height);
+});
+async function pickEmoji(page: Page, name: string) {
+  await page.getByRole('button', { name: 'Add emoji', exact: true }).click();
+  await page.getByRole('button', { name, exact: true }).click();
+}
+test('emoji are added from the grid or pasted, cross a seam, reload and undo as one step', async ({
+  page,
+}) => {
+  const errors: string[] = [];
+  page.on('pageerror', (e) => errors.push(e.message));
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  const open = page.getByRole('button', { name: 'Add emoji', exact: true });
+  const grid = page.locator('#emoji-picker');
+
+  // Keyboard reachable, big enough to hit, and Escape closes it.
+  await open.click();
+  await expect(grid).toBeVisible();
+  const party = page.getByRole('button', { name: 'party popper' });
+  expect((await party.boundingBox())!.height).toBeGreaterThanOrEqual(42);
+  expect(await grid.getByRole('button').count()).toBeGreaterThanOrEqual(48);
+  await party.focus();
+  await page.keyboard.press('Escape');
+  await expect(grid).toBeHidden();
+
+  // Invalid input shows a message and adds nothing.
+  await open.click();
+  const field = page.getByLabel('Type or paste an emoji');
+  const add = grid.getByRole('button', { name: 'Add', exact: true });
+  await add.click();
+  await expect(grid.getByRole('alert')).toContainText('Type or paste');
+  await field.fill('hello');
+  await add.click();
+  await expect(grid.getByRole('alert')).toContainText('no emoji');
+  await field.fill('🎉'.repeat(9));
+  await field.press('Enter');
+  await expect(grid.getByRole('alert')).toContainText('too long');
+  await expect(page.locator('.text-hit')).toHaveCount(0);
+  await page.keyboard.press('Escape');
+
+  // From the grid: large, centred, selected, one undo step.
+  await pickEmoji(page, 'party popper');
+  await expect(grid).toBeHidden();
+  await expect(page.locator('.text-hit')).toHaveCount(1);
+  let t = await textLayer(page);
+  expect(t).toMatchObject({ text: '🎉', size: 240, fontFamily: 'DM Sans' });
+  expect(t.x + t.width / 2).toBeCloseTo(1620);
+  expect(t.y + t.height / 2).toBeCloseTo(675);
+  await expect(page.getByRole('region', { name: 'Edit text' })).toBeVisible();
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expect(page.locator('.text-hit')).toHaveCount(0);
+  await expect.poll(async () => (await saved(page)).workspace.overlays.length).toBe(0);
+  await page.getByRole('button', { name: 'Redo', exact: true }).click();
+  await expect(page.locator('.text-hit')).toHaveCount(1);
+
+  // Controls that do nothing for an emoji are gone; the useful ones stay.
+  const panel = page.getByRole('region', { name: 'Edit text' });
+  for (const name of ['Bold', 'Italic', 'Coral text', 'Custom text color'])
+    await expect(panel.getByRole('button', { name })).toHaveCount(0);
+  await expect(panel.getByLabel('Font', { exact: true })).toHaveCount(0);
+  await expect(panel.getByLabel('Highlight', { exact: true })).toHaveCount(0);
+  await expect(panel.getByLabel('Custom text color')).toHaveCount(0);
+  await expect(panel.getByLabel('Text size')).toBeVisible();
+  await expect(panel.getByRole('button', { name: 'Layer up' })).toBeVisible();
+  await expect(panel.getByRole('button', { name: 'Delete text' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Rotate text' })).toBeVisible();
+  // Typing words makes it ordinary text again.
+  const text = panel.getByLabel('Text', { exact: true });
+  await text.fill('🎉 party');
+  await expect(panel.getByRole('button', { name: 'Bold' })).toBeVisible();
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expect(panel.getByRole('button', { name: 'Bold' })).toHaveCount(0);
+
+  // Drag across the seam between slides 2 and 3: both exported slides get pixels.
+  t = await textLayer(page);
+  const hit = page.locator('.text-hit');
+  const scale = (await hit.boundingBox())!.width / t.width;
+  await drag(page, '.text-hit', (2160 - (t.x + t.width / 2)) * scale, 0);
+  await expect.poll(async () => (await textLayer(page)).x).not.toBe(t.x);
+  t = await textLayer(page);
+  expect(t.x).toBeLessThan(2160);
+  expect(t.x + t.width).toBeGreaterThan(2160);
+  const files = await exported(page);
+  const left = await inkRows(page, files[1].bytes, 1040, 1080, CREAM);
+  const right = await inkRows(page, files[2].bytes, 0, 40, CREAM);
+  expect(left.length).toBeGreaterThan(20);
+  expect(right.length).toBeGreaterThan(20);
+  expect((await inkRows(page, files[0].bytes, 0, 1080, CREAM)).length).toBe(0);
+
+  // A pasted sequence stays one cluster and one line, on top of the first.
+  await open.click();
+  await field.fill('👨‍👩‍👧‍👦🇮🇳');
+  await add.click();
+  await expect(grid).toBeHidden();
+  await expect(page.locator('.text-hit')).toHaveCount(2);
+  await expect.poll(async () => (await saved(page)).workspace.overlays[1]?.text).toBe('👨‍👩‍👧‍👦🇮🇳');
+  const pasted = (await saved(page)).workspace.overlays[1];
+  expect(pasted.height).toBe(240 * 1.25);
+  await page.getByRole('button', { name: 'Undo', exact: true }).click();
+  await expect(page.locator('.text-hit')).toHaveCount(1);
+
+  // Text layers are shared, so it survives a style switch and a reload.
+  await saved(page);
+  await page.getByRole('button', { name: /Scrapbook/ }).click();
+  await expect(page.locator('.text-hit')).toHaveCount(1);
+  await saved(page);
+  await page.reload();
+  await expect(page.locator('.text-hit')).toHaveCount(1);
+  expect((await textLayer(page)).text).toBe('🎉');
+  expect(errors).toEqual([]);
+});
+test('a highlight set before text became emoji can still be turned off', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.goto('/');
+  await addText(page);
+  const panel = page.getByRole('region', { name: 'Edit text' });
+  await panel.getByLabel('Highlight', { exact: true }).check();
+  await panel.getByLabel('Text', { exact: true }).fill('🎉');
+  const toggle = panel.getByLabel('Highlight', { exact: true });
+  await toggle.click();
+  await expect(toggle).toHaveCount(0);
+});
+test('a mouse double-click on a photo enters crop mode', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.goto('/');
+  await expect(page.getByLabel('Upload photos')).toBeEnabled();
+  await upload(page, 3);
+  const crop = page.getByRole('button', { name: /Crop photo|Done cropping/ });
+  const photo = page.locator('.photo-hit').first();
+  const box = (await photo.boundingBox())!;
+  await page.mouse.dblclick(box.x + box.width / 2, box.y + box.height / 2);
+  await expect(crop).toHaveAttribute('aria-pressed', 'true');
+  await expect(photo).toHaveAttribute('aria-pressed', 'true');
+});
+test('the text panel fits a phone and opens without moving the canvas', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/');
+  await addText(page);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  const panel = (await page.getByRole('region', { name: 'Edit text' }).boundingBox())!;
+  const canvas = (await page
+    .getByRole('group', { name: 'Interactive collage canvas' })
+    .boundingBox())!;
+  expect(panel.y).toBeGreaterThan(canvas.y + canvas.height);
 });

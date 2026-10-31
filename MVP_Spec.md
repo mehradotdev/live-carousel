@@ -28,6 +28,20 @@
 
 ---
 
+### Session Decisions (30 October 2026) — Free Editor
+
+These override any conflicting text below.
+
+- **Re-layout on ratio/slide-count change (undoable):** Bento rebuilds the grid keeping photo order and crops (divider tweaks reset). Scrapbook scales layers on ratio change; added slides append empty at the end; layers on removed slides are pulled onto the last slide. Text and emoji behave like Scrapbook layers in both styles.
+- **Style switching:** Bento and Scrapbook layouts are stored separately; switching back restores the exact layout. Text/emoji layers are shared. Photos added in one style are auto-placed in the other.
+- **Bento:** gap 0–60px (default 12), outer margin 0–120px (default 24), corner roundness 0–60px (default 0). Margin color is the user-selectable slide background (cream default, ~6 swatches plus picker). Minimum cell 120px.
+- **Canvas:** bounded (N × slide width), Excalidraw-style zoom-to-cursor/pinch, pan, Fit, numbered slide strip; area outside slides dimmed. Larger default zoom on phones.
+- **Text layers:** 6 bundled open-licence fonts (2 serif, 2 sans, 1 handwritten, 1 display) stored by family name; size, color, bold, italic, alignment, optional highlight pill; edited in a side-panel textarea (double-click on canvas focuses it); layer up/down. In Bento, text/emoji float above the grid; in Scrapbook all layers share one z-order.
+- **Emoji:** curated ~48-emoji grid plus a field to type or paste any emoji; rendered as text layers with the device emoji font.
+- **Theme:** app theme never affects exported pixels; slide background, text colors and fonts are project data.
+- **Storage:** early alpha, no migrations; the IndexedDB name changes when the format changes.
+- **Build order:** docs → polish → Tailwind/daisyUI → image pipeline → ratios & slide count → canvas navigation → Bento editing → text → emoji.
+
 ## 2. Target Users & Success Criteria
 
 ### Target Users
@@ -53,25 +67,25 @@
 
 ### Feature Matrix
 
-| Capability           | MVP Status        | Specification / Boundary                                                                                                                                                           |
-| -------------------- | ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Aspect Ratios**    | Locked / Proposed | Portrait 4:5 (Default), Square 1:1; Landscape preset proposed at 1.91:1 _[Needs Validation against Instagram specs]_                                                               |
-| **Slide Count**      | Locked            | 2 to 5 slides; Default is 3                                                                                                                                                        |
-| **Input Formats**    | Locked / Proposed | JPEG, PNG, WebP; respect EXIF orientation. HEIC/HEIF deferred or requires proven conversion path. Still photos only (no video/Live Photos)                                         |
-| **Photo Quantities** | Locked / Proposed | Minimum 1 photo per slide (e.g., 5 slides require $\ge 5$ photos); recommended 2–3 per slide; suggested upper limit of 15 photos _[Needs Validation via device performance tests]_ |
-| **Layout Styles**    | Locked            | **Bento Grid** (structured, shared dividers) and **Scrapbook** (layered, rotated, overlaps)                                                                                        |
-| **Composition**      | Locked            | Algorithmic/heuristic one-click layout with Shuffle Layout capability                                                                                                              |
-| **Editor**           | Locked            | Style-aware direct manipulation, per-photo cropping, boundary guides, undo/redo                                                                                                    |
-| **Static Export**    | Locked            | Individual PNG/JPEG slides cropped from wide canvas; optional ZIP download; no auth/payment required                                                                               |
-| **AI Motion**        | Locked            | Selective image-to-video animation capped at **1 to 3 photos** per collage; credit cost quoted upfront                                                                             |
-| **Video Export**     | Locked            | Separate MP4 files (one per slide); identical dimensions and duration (target 4–6 seconds, 24/30 fps, no audio, H.264)                                                             |
-| **Monetization**     | Locked            | One-time PayPal credit packages exclusively; Sandbox implementation                                                                                                                |
-| **Authentication**   | Locked            | Required only when initiating credit purchases or cloud AI generation                                                                                                              |
-| **Persistence**      | Locked            | Exactly one local workspace in browser IndexedDB; no multi-project selection dashboard                                                                                             |
-| **Concurrency**      | Locked            | Single active editing tab enforced via Web Locks API + BroadcastChannel; second tab provides takeover                                                                              |
-| **Cloud Storage**    | Locked / Proposed | Ephemeral private Cloudflare R2 storage for AI inputs/outputs; proposed 7-day expiration                                                                                           |
+| Capability           | MVP Status        | Specification / Boundary                                                                                                                                          |
+| -------------------- | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Aspect Ratios**    | Locked            | 4:5 (default, 1080×1350), 3:4 (1080×1440), 1:1 (1080×1080), 9:16 (1080×1920, best for Stories/TikTok); each shows a "best for" hint. Custom ratios deferred       |
+| **Slide Count**      | Locked            | 1 to 20 slides; Default is 3                                                                                                                                      |
+| **Input Formats**    | Locked / Proposed | JPEG, PNG, WebP; respect EXIF orientation. HEIC/HEIF deferred or requires proven conversion path. Still photos only (no video/Live Photos)                        |
+| **Photo Quantities** | Locked            | 0 to 100 photos, 20 MB each; zero photos renders the background only. Bento auto-layouts place at most 6 photos per slide; extras wait in the tray                |
+| **Layout Styles**    | Locked            | **Bento Grid** (structured, shared dividers) and **Scrapbook** (layered, rotated, overlaps)                                                                       |
+| **Composition**      | Locked            | Algorithmic/heuristic one-click layout with Shuffle Layout capability                                                                                             |
+| **Editor**           | Locked            | Style-aware direct manipulation, per-photo cropping, boundary guides, undo/redo                                                                                   |
+| **Static Export**    | Locked            | Individual PNG/JPEG slides rendered one slide at a time from stored masters; ZIP download, or the share sheet on phones; always enabled; no auth/payment required |
+| **AI Motion**        | Locked            | Selective image-to-video animation capped at **1 to 3 photos** per collage; credit cost quoted upfront                                                            |
+| **Video Export**     | Locked            | Separate MP4 files (one per slide); identical dimensions and duration (target 4–6 seconds, 24/30 fps, no audio, H.264)                                            |
+| **Monetization**     | Locked            | One-time PayPal credit packages exclusively; Sandbox implementation                                                                                               |
+| **Authentication**   | Locked            | Required only when initiating credit purchases or cloud AI generation                                                                                             |
+| **Persistence**      | Locked            | Exactly one local workspace in browser IndexedDB; no multi-project selection dashboard                                                                            |
+| **Concurrency**      | Locked            | Single active editing tab enforced via Web Locks API + BroadcastChannel; second tab provides takeover                                                             |
+| **Cloud Storage**    | Locked / Proposed | Ephemeral private Cloudflare R2 storage for AI inputs/outputs; proposed 7-day expiration                                                                          |
 
-- Avoid automatic image duplication or blank slides; offer Add Photos or Reduce Slides when needed.
+- Avoid automatic image duplication. Bento templates always fill the full strip; cells may span slide seams.
 - Suggested starter Bento template count: 3–5.
 
 ### Explicitly Excluded from Scope
@@ -84,8 +98,8 @@
 - Template or asset marketplace
 - Text-to-image AI panorama generation
 - Direct social API publishing (Instagram Graph API)
-- Arbitrary cell split/merge engine for Bento layouts
-- Complex sticker, text, or vector overlay packs
+- Arbitrary cell split/merge engine for Bento layouts (deleting a cell lets its neighbor take over; adding splits the selected or largest cell)
+- Sticker art packs and vector overlays (simple text layers and emoji are in scope; custom font uploads deferred)
 - Video or Apple Live Photo file imports
 - Heavy client-side WebGL real-time shaders
 - Offline PWA install guarantees
@@ -98,8 +112,8 @@
 ### 4.1 Free Quick-Create Flow
 
 1. **Application Launch:** Client checks for existing local workspace in IndexedDB. If found, it automatically restores state without displaying a recovery prompt; otherwise, presents an empty initial state.
-2. **Configuration:** User selects Layout Style (Bento Grid or Scrapbook), Aspect Ratio (Portrait 4:5 default, Square 1:1, or Landscape 1.91:1), and Slide Count (2–5, default 3).
-3. **Asset Ingestion:** Drag-and-drop or file picker ingestion. Displays thumbnails and count. Rejects non-image files; enforces minimum photo rule ($\ge 1$ photo per slide).
+2. **Configuration:** User selects Layout Style (Bento Grid or Scrapbook), Aspect Ratio (4:5 default, 3:4, 1:1, 9:16), and Slide Count (1–20, default 3).
+3. **Asset Ingestion:** Drag-and-drop or file picker ingestion. Displays thumbnails and count. Rejects non-image files; no minimum photo count.
 4. **Layout Generation:** User clicks "Create My Collage". Algorithm renders continuous composition on the shared global canvas and displays an interactive swipeable preview. Actions available: **Shuffle**, **Customize**, **Download Images**, **Bring to Life**.
 5. **Optional Editing:** User modifies layer positions, crops images inside tiles, adjusts shared Bento dividers, or reorders Scrapbook layers with undo/redo support.
 6. **Static Export:** User clicks "Download Images". Renderer slices the logical canvas into $N$ slides and exports individual PNG/JPEG files (or a bundled ZIP). User remains anonymous.
@@ -156,7 +170,7 @@
   $$\text{Global Canvas Width} = N \times W, \quad \text{Global Canvas Height} = H$$
 - **Slide Extraction Rectangles:** Slide index $i \in [0, N-1]$ corresponds strictly to logical crop box:
   $$\text{CropBox}_i = [i \times W, \, 0, \, W, \, H]$$
-- **Asset Immutability:** Original uploaded image blobs remain immutable. Transformations (scale, translation, rotation, crop window) apply exclusively to Layer instances.
+- **Asset Immutability:** On ingest each photo is decoded once (EXIF orientation applied) and stored as an immutable master (≤4096px long edge, JPEG 0.92 or PNG when the master has any transparency, metadata stripped) plus a 1440px preview in the same format. Uploaded files are not kept. The editor decodes previews once per photo at display size; export renders one slide at a time and decodes, paints and closes one master at a time. Transformations (scale, translation, rotation, crop window) apply exclusively to Layer instances.
 
 ### Bento Grid Mode Rules
 
@@ -224,19 +238,19 @@
 - Use Vercel only for a concrete Cloudflare incompatibility.
 - Confirm provider delivery method and model availability before implementing the adapter.
 
-| System Role                 | Selected Technology                        | Technical Notes                                                                       |
-| --------------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------- |
-| **Web Framework & UI**      | **SvelteKit + TypeScript**                 | Tailwind CSS, shadcn-svelte; desktop-first editing, responsive mobile viewer          |
-| **Hosting & Edge Compute**  | **Cloudflare Workers**                     | `@sveltejs/adapter-cloudflare`; compute strictly bounded (no long media processing)   |
-| **Client Storage**          | **IndexedDB** (via `idb`)                  | Stores raw Blobs (`LocalAsset`) and single `Workspace` record. OPFS deferred          |
-| **Canvas Manipulation**     | **Evaluate Konva.js** vs Native Canvas/SVG | _[Needs Validation]_ Must share identical data model with server/export renderers     |
-| **Authentication**          | **WorkOS AuthKit** (Preferred) / Clerk     | _[Needs Validation with SvelteKit + Convex JWT]_; guest access for static flows       |
-| **Backend State & DB**      | **Convex**                                 | Manages user entities, transactional credit ledger, PayPal order states, job queues   |
-| **Temporary Media Storage** | **Cloudflare R2**                          | Private bucket, short-lived presigned URLs, CORS policy, 7-day lifecycle deletion     |
-| **AI Video Generation**     | Managed API (e.g., **fal.ai**)             | _[Needs Validation on fidelity, cost, latency, subtle motion]_; asynchronous calls    |
-| **Payment Gateway**         | **PayPal Orders v2 (Sandbox)**             | Server-side capture verification, webhook signature validation, idempotent ledger     |
-| **Static Renderer**         | Client-side Canvas 2D                      | Deterministic rendering from logical canvas model; ZIP packaging                      |
-| **Video Renderer**          | Browser **WebCodecs + OffscreenCanvas**    | _[Needs Validation]_; managed server-side rendering fallback for unsupported browsers |
+| System Role                 | Selected Technology                        | Technical Notes                                                                                                     |
+| --------------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| **Web Framework & UI**      | **SvelteKit + TypeScript**                 | Tailwind CSS v4 + daisyUI 5 (custom `livingcarousel` theme, light only for now), native elements; self-hosted fonts |
+| **Hosting & Edge Compute**  | **Cloudflare Workers**                     | `@sveltejs/adapter-cloudflare`; compute strictly bounded (no long media processing)                                 |
+| **Client Storage**          | **IndexedDB** (via `idb`)                  | Stores raw Blobs (`LocalAsset`) and single `Workspace` record. OPFS deferred                                        |
+| **Canvas Manipulation**     | **Evaluate Konva.js** vs Native Canvas/SVG | _[Needs Validation]_ Must share identical data model with server/export renderers                                   |
+| **Authentication**          | **WorkOS AuthKit** (Preferred) / Clerk     | _[Needs Validation with SvelteKit + Convex JWT]_; guest access for static flows                                     |
+| **Backend State & DB**      | **Convex**                                 | Manages user entities, transactional credit ledger, PayPal order states, job queues                                 |
+| **Temporary Media Storage** | **Cloudflare R2**                          | Private bucket, short-lived presigned URLs, CORS policy, 7-day lifecycle deletion                                   |
+| **AI Video Generation**     | Managed API (e.g., **fal.ai**)             | _[Needs Validation on fidelity, cost, latency, subtle motion]_; asynchronous calls                                  |
+| **Payment Gateway**         | **PayPal Orders v2 (Sandbox)**             | Server-side capture verification, webhook signature validation, idempotent ledger                                   |
+| **Static Renderer**         | Client-side Canvas 2D                      | Deterministic rendering from logical canvas model; ZIP packaging                                                    |
+| **Video Renderer**          | Browser **WebCodecs + OffscreenCanvas**    | _[Needs Validation]_; managed server-side rendering fallback for unsupported browsers                               |
 
 _Architectural Constraint:_ Cloudflare Workers must never execute multi-minute video encoding tasks. Background tasks are orchestrated via Convex scheduler/actions and external provider webhooks.
 
@@ -248,7 +262,7 @@ _Architectural Constraint:_ Cloudflare Workers must never execute multi-minute v
 
 ```typescript
 type LayoutMode = 'bento' | 'scrapbook';
-type AspectPreset = 'portrait_4_5' | 'square_1_1' | 'landscape_1_91_1';
+type AspectPreset = '4:5' | '3:4' | '1:1' | '9:16';
 type AnimationKind = 'none' | 'ai_subtle' | 'ken_burns';
 
 interface Workspace {
@@ -303,8 +317,8 @@ interface Layer {
 interface LocalAsset {
   id: string;
   mimeType: string;
-  originalBlob: Blob; // Persisted in IndexedDB assets store
-  thumbnailBlob?: Blob;
+  masterBlob: Blob; // ≤4096px, metadata stripped, immutable
+  previewBlob: Blob; // ≤1440px, editor only
   width: number;
   height: number;
   kind: 'image' | 'generated_video';
@@ -413,9 +427,9 @@ _Terminal States:_ `completed`, `failed`, `expired`, `cancelled`. Define credit 
 
 ### Must-Pass Free Static Editor
 
-- [ ] User can launch app without logging in and configure layout mode, aspect ratio, and 2–5 slide count.
+- [ ] User can launch app without logging in and configure layout mode, aspect ratio, and 1–20 slide count.
 - [ ] Ingestion handles mixed portrait, landscape, and square photos without image stretching or EXIF orientation distortion.
-- [ ] Minimum photo restriction ($\ge 1$ photo per slide) is enforced with clear UI messaging blocking layout creation until met.
+- [ ] Zero photos is valid; export always works.
 - [ ] Bento Grid and Scrapbook modes each generate coherent initial layouts; "Shuffle Layout" generates distinct usable variations.
 - [ ] Shared global canvas accurately renders across slides; exported PNG/JPEG slides exactly match the preview boundaries and seams.
 - [ ] Bento divider dragging resizes adjacent neighbor cells without leaving unmapped gaps or overlapping boundaries; photo crop remains an independent control.
