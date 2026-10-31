@@ -85,7 +85,23 @@ Use private secret prompts for credentials; never paste secrets in chat, README,
 
 The development deployment currently uses `http://localhost:5173` as its auth origin and `Living Carousel <signin@mail.mehra.dev>` as its sender. The Resend key is stored on Convex. The sender domain is verified; a real sign-in link was sent and the user confirmed successful sign-in on 29 October 2026. Restart `pnpm dev` after changing `.env.local` (the current Vite+/SvelteKit combination can fail a hot restart after env changes).
 
-No Wrangler/global CLI is needed for these integrations. The project-local Convex CLI manages backend deployment. Hosting the web app on Cloudflare will require selecting its adapter and configuring Wrangler later.
+No global CLI is needed for these integrations. The project-local Convex CLI manages backend deployment.
+
+## Deploy to Cloudflare Workers
+
+The web app uses `@sveltejs/adapter-cloudflare` and the pinned project-local Wrangler. `apps/web/wrangler.jsonc` points the Worker at `.svelte-kit/cloudflare/_worker.js` with static assets from `.svelte-kit/cloudflare`. Do not use `npx wrangler`: npm fails the `devEngines` pnpm check.
+
+Workers Builds settings (Worker name must match `name` in `apps/web/wrangler.jsonc`, `living-carousel`):
+
+| Setting        | Value             |
+| -------------- | ----------------- |
+| Root directory | `/` (repo root)   |
+| Build command  | `pnpm build`      |
+| Deploy command | `pnpm run deploy` |
+
+Build variables (inlined at build time, so set them under Build, not as runtime Worker variables): `PUBLIC_CONVEX_URL` and `PUBLIC_CONVEX_SITE_URL` of the production Convex deployment. Node comes from `.node-version`; set `PNPM_VERSION=12.16.1` if the build image ignores `packageManager`. No secrets belong on the Worker; credentials stay in Convex.
+
+After the first deploy, set Convex `SITE_URL` on that deployment to the exact Worker origin (for example `https://living-carousel.<subdomain>.workers.dev` or a custom domain) and add that origin to the R2 CORS policy. Locally, `pnpm build && pnpm run deploy --dry-run` validates the bundle without uploading; `pnpm --filter @living/web exec wrangler dev` serves the built Worker.
 
 ### Remaining paid workflow
 
@@ -95,7 +111,7 @@ Next: validate R2 PUT/finalization/download/deletion against the private bucket,
 
 ## Known limits
 
-Shared Bento dividers preserve the layout partition; arbitrary cell merge and multi-selection are not implemented. No paid AI/video flow, native mobile app, social publishing, cloud sync, or multi-project dashboard yet. Browser tests currently cover Chromium; Safari/iOS and Android hardware testing remains outstanding. Fast tab closure before a pending IndexedDB save completes can lose the latest edits; wait for Saved or export first. Adapter-auto supports local validation; select the deployment adapter when wiring the hosting environment.
+Shared Bento dividers preserve the layout partition; arbitrary cell merge and multi-selection are not implemented. No paid AI/video flow, native mobile app, social publishing, cloud sync, or multi-project dashboard yet. Browser tests currently cover Chromium; Safari/iOS and Android hardware testing remains outstanding. Fast tab closure before a pending IndexedDB save completes can lose the latest edits; wait for Saved or export first.
 
 ## License
 
