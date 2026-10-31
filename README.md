@@ -93,11 +93,14 @@ The web app uses `@sveltejs/adapter-cloudflare` and the pinned project-local Wra
 
 Workers Builds settings (Worker name must match `name` in `apps/web/wrangler.jsonc`, `live-carousel`):
 
-| Setting        | Value             |
-| -------------- | ----------------- |
-| Root directory | `/` (repo root)   |
-| Build command  | `pnpm build`      |
-| Deploy command | `pnpm run deploy` |
+| Setting                                        | Value                                             |
+| ---------------------------------------------- | ------------------------------------------------- |
+| Root directory                                 | `/` (repo root)                                   |
+| Build command                                  | `pnpm build`                                      |
+| Deploy command                                 | `pnpm run deploy`                                 |
+| Non-production branch deploy command (preview) | `pnpm --filter @living/web exec wrangler preview` |
+
+The production and preview deploy commands are separate dashboard settings; replace `npx` in both. Wrangler is already installed in the workspace, and Workers Builds supplies deployment authentication. A global install or local `wrangler login` is unnecessary for dashboard builds.
 
 Build variables (inlined at build time, so set them under Build, not as runtime Worker variables): `PUBLIC_CONVEX_URL` and `PUBLIC_CONVEX_SITE_URL` of the production Convex deployment. Node comes from `.node-version`; set `PNPM_VERSION=12.16.1` if the build image ignores `packageManager`. No secrets belong on the Worker; credentials stay in Convex.
 
